@@ -2,7 +2,12 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence, useMotionValue, useTransform } from "framer-motion";
-import { User, Code2, Briefcase, Network, MessageSquare, Play, Pause, RotateCcw, Zap, Terminal, Search, Plus, ListFilter, Clock, Maximize2 } from "lucide-react";
+import { User, Code2, Briefcase, Network, MessageSquare, Play, Pause, RotateCcw, Zap, Terminal, Search, Plus, Maximize2, ListFilter, Clock } from "lucide-react";
+
+// --- Metadata ---
+// Note: Client components cannot export metadata directly. 
+// We should have a server-side layout or use document.title if strictly needed.
+// For now, I'll ensure the root layout covers the main title.
 
 // --- Types ---
 
