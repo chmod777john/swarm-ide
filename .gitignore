@@ -2,3 +2,10 @@ node_modules/
 whitepaper-site/node_modules/
 .claude/
 .specify/
+backend/.env
+backend/node_modules/
+backend/.next/
+backend/tsconfig.tsbuildinfo
+tmp/
+.gemini/
+.mcp.json
