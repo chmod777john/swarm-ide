@@ -1,5 +1,6 @@
 "use client";
 
+import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type UUID = string;
@@ -85,13 +86,8 @@ function cx(...classes: Array<string | false | undefined | null>) {
 }
 
 export default function IMPage() {
-  const [workspaceOverrideId] = useState<string | null>(() => {
-    try {
-      return new URLSearchParams(window.location.search).get("workspaceId");
-    } catch {
-      return null;
-    }
-  });
+  const searchParams = useSearchParams();
+  const workspaceOverrideId = searchParams.get("workspaceId");
   const [session, setSession] = useState<WorkspaceDefaults | null>(() => null);
   const [groups, setGroups] = useState<Group[]>([]);
   const [activeGroupId, setActiveGroupId] = useState<string | null>(null);
@@ -114,13 +110,22 @@ export default function IMPage() {
     [groups, activeGroupId]
   );
 
-  const bootstrap = useCallback(async () => {
+  const bootstrap = useCallback(async (overrideWorkspaceId: string | null) => {
     setError(null);
     setAgentError(null);
     setStatus("boot");
 
-    if (workspaceOverrideId) {
-      const ensured = await api<WorkspaceDefaults>(`/api/workspaces/${workspaceOverrideId}/defaults`);
+    setGroups([]);
+    setMessages([]);
+    setAssistantStreamingText("");
+    setAssistantStreamingReasoning("");
+    setAgentHistory([]);
+    esRef.current?.close();
+
+    if (overrideWorkspaceId) {
+      const ensured = await api<WorkspaceDefaults>(
+        `/api/workspaces/${overrideWorkspaceId}/defaults`
+      );
       saveSession(ensured);
       setSession(ensured);
       setActiveGroupId(ensured.defaultGroupId);
@@ -152,7 +157,7 @@ export default function IMPage() {
     setSession(created);
     setActiveGroupId(created.defaultGroupId);
     setStatus("idle");
-  }, [workspaceOverrideId]);
+  }, []);
 
   const createWorkspace = useCallback(async (name?: string) => {
     setError(null);
@@ -271,8 +276,10 @@ export default function IMPage() {
   }, [activeGroupId, draft, refreshGroups, refreshMessages, session]);
 
   useEffect(() => {
-    void bootstrap().catch((e) => setError(e instanceof Error ? e.message : String(e)));
-  }, [bootstrap]);
+    void bootstrap(workspaceOverrideId).catch((e) =>
+      setError(e instanceof Error ? e.message : String(e))
+    );
+  }, [bootstrap, workspaceOverrideId]);
 
   useEffect(() => {
     activeGroupIdRef.current = activeGroupId;
