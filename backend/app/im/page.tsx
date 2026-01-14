@@ -85,6 +85,13 @@ function cx(...classes: Array<string | false | undefined | null>) {
 }
 
 export default function IMPage() {
+  const [workspaceOverrideId] = useState<string | null>(() => {
+    try {
+      return new URLSearchParams(window.location.search).get("workspaceId");
+    } catch {
+      return null;
+    }
+  });
   const [session, setSession] = useState<WorkspaceDefaults | null>(() => null);
   const [groups, setGroups] = useState<Group[]>([]);
   const [activeGroupId, setActiveGroupId] = useState<string | null>(null);
@@ -112,6 +119,15 @@ export default function IMPage() {
     setAgentError(null);
     setStatus("boot");
 
+    if (workspaceOverrideId) {
+      const ensured = await api<WorkspaceDefaults>(`/api/workspaces/${workspaceOverrideId}/defaults`);
+      saveSession(ensured);
+      setSession(ensured);
+      setActiveGroupId(ensured.defaultGroupId);
+      setStatus("idle");
+      return;
+    }
+
     const existing = loadSession();
     if (existing) {
       try {
@@ -136,7 +152,7 @@ export default function IMPage() {
     setSession(created);
     setActiveGroupId(created.defaultGroupId);
     setStatus("idle");
-  }, []);
+  }, [workspaceOverrideId]);
 
   const refreshGroups = useCallback(async (s: WorkspaceDefaults) => {
     setStatus("groups");
@@ -424,4 +440,3 @@ export default function IMPage() {
     </div>
   );
 }
-
