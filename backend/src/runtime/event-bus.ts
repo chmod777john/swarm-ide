@@ -60,6 +60,10 @@ export class AgentEventBus {
       channel.buffer.splice(0, channel.buffer.length - this.maxBuffer);
     }
 
+    // Best-effort persistence for cross-process/history replay (optional).
+    // This keeps the existing in-memory bus semantics while enabling Redis Streams.
+    void persistAgentEvent(agentId, evt);
+
     for (const listener of channel.listeners) {
       listener(evt);
     }
@@ -86,3 +90,16 @@ export class AgentEventBus {
 
 export type { AgentEvent };
 
+async function persistAgentEvent(agentId: string, evt: AgentEvent) {
+  const { isUpstashRealtimeConfigured, getUpstashRealtime } = await import("./upstash-realtime");
+  if (!isUpstashRealtimeConfigured()) return;
+  try {
+    await getUpstashRealtime().channel(`agent:${agentId}`).emit(evt.event, {
+      id: evt.id,
+      at: evt.at,
+      data: evt.data,
+    });
+  } catch {
+    // ignore
+  }
+}

@@ -2,6 +2,7 @@ export const runtime = "nodejs";
 
 import { store } from "@/lib/storage";
 import { getAgentRuntime } from "@/runtime/agent-runtime";
+import { getWorkspaceUIBus } from "@/runtime/ui-bus";
 
 export async function GET(
   req: Request,
@@ -39,6 +40,12 @@ export async function POST(
     senderId: body.senderId,
     content: body.content,
     contentType: body.contentType ?? "text",
+  });
+
+  const workspaceId = await store.getGroupWorkspaceId({ groupId });
+  getWorkspaceUIBus().emit(workspaceId, {
+    event: "ui.message.created",
+    data: { workspaceId, groupId, message: { id: result.id, senderId: body.senderId, sendTime: result.sendTime } },
   });
 
   const runtime = getAgentRuntime();

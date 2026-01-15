@@ -1,7 +1,6 @@
 export const runtime = "nodejs";
 
-import { store } from "@/lib/storage";
-import { getAgentRuntime } from "@/runtime/agent-runtime";
+import { getWorkspaceUIBus } from "@/runtime/ui-bus";
 import { getUpstashRealtime, isUpstashRealtimeConfigured } from "@/runtime/upstash-realtime";
 
 function sse(data: unknown) {
@@ -18,35 +17,16 @@ function sseWithId(id: string | number | null | undefined, data: unknown) {
   return new TextEncoder().encode(`${prefix}data: ${JSON.stringify(data)}\n\n`);
 }
 
-export async function GET(
-  req: Request,
-  { params }: { params: Promise<{ agentId: string }> }
-) {
-  const { agentId } = await params;
+export async function GET(req: Request) {
   const url = new URL(req.url);
-  const groupId = url.searchParams.get("groupId") ?? null;
-  const runtime = getAgentRuntime();
-  await runtime.bootstrap();
+  const workspaceId = url.searchParams.get("workspaceId") ?? "";
+  if (!workspaceId) {
+    return Response.json({ error: "Missing workspaceId" }, { status: 400 });
+  }
 
+  const bus = getWorkspaceUIBus();
   const lastEventIdHeader = (req.headers.get("Last-Event-ID") ?? "").trim();
   const lastEventNumericId = Number(lastEventIdHeader || "0");
-  const agent = await store.getAgent({ agentId });
-  if (agent.role !== "human") {
-    void runtime.wakeAgent(agentId);
-  }
-  const history = (() => {
-    try {
-      const parsed = JSON.parse(agent.llmHistory) as unknown;
-      if (Array.isArray(parsed)) return parsed as Array<{ role: string; content: string }>;
-      if (parsed && typeof parsed === "object" && groupId) {
-        const byGroup = parsed as Record<string, Array<{ role: string; content: string }>>;
-        return Array.isArray(byGroup[groupId]) ? byGroup[groupId] : [];
-      }
-      return [];
-    } catch {
-      return [];
-    }
-  })();
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -59,20 +39,16 @@ export async function GET(
       };
       const sendKeepalive = () => controller.enqueue(new TextEncoder().encode(`: ping\n\n`));
 
-      send({ event: "agent.history", data: { history } });
-
       let unsubscribe: (() => void) | null = null;
       let upstashUnsubscribe: (() => void) | null = null;
 
       if (isUpstashRealtimeConfigured()) {
-        const channel = getUpstashRealtime().channel(`agent:${agentId}`);
-
+        const channel = getUpstashRealtime().channel(`ui:${workspaceId}`);
         const start = lastEventIdHeader ? `(${lastEventIdHeader}` : "-";
         upstashUnsubscribe = await channel.subscribe({
-          events: ["agent.history", "agent.stream", "agent.done", "agent.error"],
+          events: ["ui.agent.created", "ui.group.created", "ui.message.created"],
           history: { start: start as any, end: "+" as any, limit: 2000 },
           onData: (evt) => {
-            // evt shape: { id: string, channel: string, event: string, data: unknown }
             const payload = {
               event: evt.event,
               data: (evt.data as any)?.data ?? evt.data,
@@ -81,12 +57,10 @@ export async function GET(
           },
         });
       } else {
-        for (const evt of runtime.bus.getSince(agentId, lastEventNumericId)) {
+        for (const evt of bus.getSince(workspaceId, lastEventNumericId)) {
           send(evt);
         }
-        unsubscribe = runtime.bus.subscribe(agentId, (evt) => {
-          send(evt);
-        });
+        unsubscribe = bus.subscribe(workspaceId, (evt) => send(evt));
       }
 
       const keepalive = setInterval(sendKeepalive, 15_000);

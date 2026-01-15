@@ -3,6 +3,10 @@ whitepaper-site/node_modules/
 .claude/
 .specify/
 backend/.env
+backend/.env.local
+backend/.env.*local
+backend/.env.*
+!backend/.env.example
 backend/node_modules/
 backend/.next/
 backend/tsconfig.tsbuildinfo

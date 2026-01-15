@@ -12,13 +12,8 @@ type WorkspaceDefaults = {
   defaultGroupId: UUID;
 };
 
-type Message = {
-  id: UUID;
-  senderId: UUID;
-  content: string;
-  contentType: string;
-  sendTime: string;
-};
+type GraphNode = { id: UUID; role: string; parentId: UUID | null };
+type GraphEdge = { from: UUID; to: UUID; count: number; lastSendTime: string };
 
 const SESSION_KEY = "agent-wechat.session.v1";
 
@@ -40,34 +35,35 @@ async function api<T>(path: string): Promise<T> {
 
 export default function GraphPage() {
   const [session] = useState<WorkspaceDefaults | null>(() => loadSession());
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [nodes, setNodes] = useState<GraphNode[]>([]);
+  const [edges, setEdges] = useState<GraphEdge[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!session) return;
     void (async () => {
       try {
-        const q = new URLSearchParams({ markRead: "false", readerId: session.humanAgentId });
-        const { messages } = await api<{ messages: Message[] }>(
-          `/api/groups/${session.defaultGroupId}/messages?${q.toString()}`
-        );
-        setMessages(messages);
+        const q = new URLSearchParams({ workspaceId: session.workspaceId, limitMessages: "2000" });
+        const res = await api<{ nodes: GraphNode[]; edges: GraphEdge[] }>(`/api/agent-graph?${q.toString()}`);
+        setNodes(res.nodes);
+        setEdges(res.edges);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       }
     })();
   }, [session]);
 
+  const roleById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const n of nodes) map.set(n.id, n.role);
+    return map;
+  }, [nodes]);
+
   const stats = useMemo(() => {
-    if (!session) return null;
-    let humanToAssistant = 0;
-    let assistantToHuman = 0;
-    for (const m of messages) {
-      if (m.senderId === session.humanAgentId) humanToAssistant++;
-      if (m.senderId === session.assistantAgentId) assistantToHuman++;
-    }
-    return { humanToAssistant, assistantToHuman };
-  }, [messages, session]);
+    const totalEdges = edges.length;
+    const totalMessages = edges.reduce((sum, e) => sum + e.count, 0);
+    return { totalEdges, totalMessages };
+  }, [edges]);
 
   if (!session) {
     return (
@@ -85,9 +81,9 @@ export default function GraphPage() {
     <div style={{ padding: 24 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
         <div>
-          <h1 style={{ margin: 0, fontSize: 20 }}>Agent Graph (stub)</h1>
+          <h1 style={{ margin: 0, fontSize: 20 }}>Agent Graph</h1>
           <p className="muted" style={{ marginTop: 8 }}>
-            Default P2P only (counts messages). Full event graph comes next.
+            Aggregated message flow (sender → all other group members).
           </p>
         </div>
         <Link className="btn" href="/im">
@@ -99,19 +95,47 @@ export default function GraphPage() {
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 320px))", gap: 12, marginTop: 16 }}>
         <div className="card">
-          <div className="card-title">Human → Assistant</div>
+          <div className="card-title">Edges</div>
           <div className="card-body" style={{ fontSize: 28, fontWeight: 700 }}>
-            {stats?.humanToAssistant ?? 0}
+            {stats.totalEdges}
           </div>
         </div>
         <div className="card">
-          <div className="card-title">Assistant → Human</div>
+          <div className="card-title">Messages (aggregated)</div>
           <div className="card-body" style={{ fontSize: 28, fontWeight: 700 }}>
-            {stats?.assistantToHuman ?? 0}
+            {stats.totalMessages}
           </div>
+        </div>
+      </div>
+
+      <div className="card" style={{ marginTop: 16, maxWidth: 980 }}>
+        <div className="card-title">Recent Flows</div>
+        <div className="card-body" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {edges.length === 0 ? (
+            <div className="muted">No edges yet. Send some messages in IM.</div>
+          ) : (
+            edges.slice(0, 80).map((e) => {
+              const fromLabel = roleById.get(e.from) ?? e.from.slice(0, 8);
+              const toLabel = roleById.get(e.to) ?? e.to.slice(0, 8);
+              return (
+                <div key={`${e.from}=>${e.to}`} className="row" style={{ cursor: "default" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                    <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {fromLabel} → {toLabel}
+                    </div>
+                    <div className="muted mono" style={{ fontSize: 12 }}>
+                      ×{e.count}
+                    </div>
+                  </div>
+                  <div className="muted mono" style={{ fontSize: 12, marginTop: 6 }}>
+                    last: {new Date(e.lastSendTime).toLocaleString()} • {e.from.slice(0, 8)} → {e.to.slice(0, 8)}
+                  </div>
+                </div>
+              );
+            })
+          )}
         </div>
       </div>
     </div>
   );
 }
-
