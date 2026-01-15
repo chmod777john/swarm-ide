@@ -31,13 +31,13 @@ export async function POST(req: Request) {
 
   const fromRole = await store.getAgentRole({ agentId: fromId }).catch(() => null);
   const toRole = await store.getAgentRole({ agentId: toId }).catch(() => null);
-  const defaultHumanId = await store.getDefaultHumanAgentId({ workspaceId });
 
   const delivered = await store.sendDirectMessage({
     workspaceId,
     fromId,
     toId,
-    observerHumanId: observerHumanId || (fromRole === "human" ? fromId : defaultHumanId),
+    // Do not implicitly add a human observer for agent↔agent threads.
+    observerHumanId: observerHumanId || (fromRole === "human" ? fromId : null),
     content,
     contentType: "text",
     groupName: null,
@@ -46,7 +46,7 @@ export async function POST(req: Request) {
 
   getWorkspaceUIBus().emit(workspaceId, {
     event: "ui.group.created",
-    data: { workspaceId, group: { id: delivered.groupId, name: null, memberIds: [fromId, toId, observerHumanId || defaultHumanId].filter(Boolean) as string[] } },
+    data: { workspaceId, group: { id: delivered.groupId, name: null, memberIds: [fromId, toId, observerHumanId].filter(Boolean) as string[] } },
   });
   getWorkspaceUIBus().emit(workspaceId, {
     event: "ui.message.created",

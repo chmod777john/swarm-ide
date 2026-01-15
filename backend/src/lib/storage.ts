@@ -204,14 +204,11 @@ export const store = {
       const candidate = await tx
         .select({ id: groups.id })
         .from(groups)
-        .where(
-          dsql`${groups.workspaceId} = ${input.workspaceId} and ${groups.id} in (
-            select ${groupMembers.groupId}
-            from ${groupMembers}
-            where (${groupMembers.userId} = ${humanAgentId} or ${groupMembers.userId} = ${assistantAgentId})
-            group by ${groupMembers.groupId}
-            having count(*) = 2 and count(distinct ${groupMembers.userId}) = 2
-          )`
+        .innerJoin(groupMembers, eq(groupMembers.groupId, groups.id))
+        .where(eq(groups.workspaceId, input.workspaceId))
+        .groupBy(groups.id)
+        .having(
+          dsql`count(*) = 2 and sum(case when ${groupMembers.userId} = ${humanAgentId} or ${groupMembers.userId} = ${assistantAgentId} then 1 else 0 end) = 2`
         )
         .orderBy(desc(groups.createdAt))
         .limit(1);
@@ -610,6 +607,17 @@ export const store = {
 
   async listGroups(input: { workspaceId?: UUID; agentId?: UUID }) {
     const db = getDb();
+    const viewerRole =
+      input.agentId
+        ? (
+            await db
+              .select({ role: agents.role })
+              .from(agents)
+              .where(eq(agents.id, input.agentId))
+              .limit(1)
+          )[0]?.role ?? null
+        : null;
+
     const rows = input.agentId
       ? await db
           .select({
@@ -656,6 +664,26 @@ export const store = {
         .where(eq(messages.groupId, g.id))
         .orderBy(desc(messages.sendTime))
         .limit(1);
+
+      // Hide "observer" threads from the human sidebar:
+      // groups with >2 members, no name, human never sent, but agents exchanged messages.
+      if (
+        viewerRole === "human" &&
+        input.agentId &&
+        (g.name ?? null) === null &&
+        members.length > 2 &&
+        lastMessage[0] &&
+        lastMessage[0].senderId !== input.agentId
+      ) {
+        const humanSent = await db
+          .select({ c: dsql<number>`count(*)` })
+          .from(messages)
+          .where(and(eq(messages.groupId, g.id), eq(messages.senderId, input.agentId)))
+          .limit(1);
+        if (Number(humanSent[0]?.c ?? 0) === 0) {
+          continue;
+        }
+      }
 
       let unreadCount = 0;
       if (input.agentId) {
