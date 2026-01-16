@@ -16,10 +16,7 @@ IM界面：
 
 ## 会话可见性（MVP 约定）
 
-- 左侧边栏只展示“人类（human agent）参与”的会话（human 是 group member）。
-- Agent↔Agent 的内部线程不会自动把 human 加入为旁观者，因此默认不会出现在左侧。
-- 为兼容历史数据/误加入场景：若某会话成员数 > 2 且 human 从未发言（messages.sender_id != human），则该会话在左侧默认隐藏（视为“旁观线程”）。
-- 人类需要介入时：通过搜索/建群/打开会话等显式把 human 加入对应 group（静态成员）。
+左侧边栏只展示“当前人类（human agent）所在的群组（group_members 含该 human）”的会话与消息。
 
 Agent-Graph 界面：展示 Agent 间的事件和数据流动
 
@@ -30,13 +27,22 @@ Agent 详情区：
 ## 用户操作路径（MVP）
 
 1) 首次进入/新建 workspace：系统自动创建人类 agent、初始助手 agent，并建立两者的 P2P 会话，落到默认对话。
-2) 进入页面加载列表：拉取对话列表（含每个会话的最近一条消息摘要与未读数），按时间排序显示。
+2) 进入页面加载列表：拉取对话列表（含每个会话的最近一条消息摘要与未读数），按时间排序显示。[并且建立监听后端的连接，当后端有类似发消息等等的事件发生时，触发拉取]   [另一条stream连接用于获取llm上下文]
 3) 发送消息：人在当前会话输入文本，消息写入后触发助手唤醒。
-4) 助手响应：助手拉取未读 → 推理流式输出 → 前端通过 SSE 流式看到回复；回到 IM 对话视图自动更新。
-5) 查看 Agent 详情：点击助手头像/卡片，右侧详情流展示完整上下文（SSE 下行）。
-6) 刷新/重进：前端重新进入页面，SSE 自动重放历史+增量，对话列表/红点同步。
-7) Agent-Graph 浏览：切换到图视图，查看消息/事件在 agent 间的流动（只读）。
-8) 搜索并建群：在搜索框内搜索人/agent，结果列表可勾选多项，一键创建群聊（静态成员）。
+4) 助手响应：助手拉取未读 → 推理流式输出 → 前端通过刚刚已经建立的stream显示llmcontext -> 本次流式输出完成，触发前端那个连接，触发拉取
+
+5) 拉取分为拉侧边栏和拉当前group
+6) llm 流式过程中，刷新页面，流式不变（也就是进入页面是总是连接那个 stream）
+
+7) 用户让 assistant 创建 coder。创建事件触发监听拉取。此时拉取结果没有变化
+8) 用户点击搜索栏，会列出 agents 和所有 groups 。用户点击单个 agent ，会自动拉群（若没有则新建）
+9) 创建群聊又会触发一次拉取，此时侧边栏就有变化了（因为侧边栏的语义是显示所有当前角色所在的群）这样就会看到一个 coder
+10) 用户给 coder 发消息，让他给 assistant 发消息。
+11) coder 的消息 wake assistant 。assistant 拉取未读消息，知晓了 coder 发送的数字
+12) 人类切换回 assistant 的界面，并且问他刚刚收到的数字是什么
+
+
+
 
 ## 界面草图（MVP 布局，ASCII）
 
@@ -76,12 +82,86 @@ Agent 详情区：
 
 ## 前后端通信（MVP 操作路径对应接口）
 
-- 进入应用：`GET /api/workspaces` 拉取当前用户可用的 workspace 列表；若为空，则 `POST /api/workspaces`（或 `/api/workspaces/default`）创建并返回 workspaceId/humanId/assistantId/defaultGroupId。
-- 发消息：`POST /api/groups/:groupId/messages` { senderId, content, contentType }；成功后后端唤醒目标 agent，流经 SSE。
-- 查看/刷新会话列表：`GET /api/groups?agentId=...&workspaceId=...` 返回群列表 + unreadCount + 每群最近一条消息摘要/时间；点进会话后可选 `GET /api/groups/:id/messages?cursor=...` 取历史。
-- 消息更新（含 Agent→Agent）：轻量触发流或短轮询，收到“有新消息”提示后，直接用 `GET /api/groups/:id/messages` 拉全量（或带分页参数）；对话列表靠 `getGroups` 更新未读/摘要。流本身不承载重播。
-- Agent 详情流：`GET /api/agents/:id/context-stream`（SSE），下行 agent.stream 事件。
-- 搜索并建群：`GET /api/search?workspaceId=...&q=...` 返回可选人/agent；勾选后 `POST /api/groups` { workspaceId, memberIds, name? }。
-- Agent-Graph：`GET /api/agent-graph?workspaceId=...`（只读数据源）；动画/增量可订阅 graph 流（与消息流同样有序 ID，断线可带 cursor 重放）。
+### 1) 首页创建 Workspace
+- 首页提供“创建 Workspace”入口；用户点击后触发  
+  `POST /api/workspaces`（或 `/api/workspaces/default`），在创建 workspace 的同时**自动创建 human + assistant + 默认 P2P 群**，返回  
+  `{ workspaceId, humanAgentId, assistantAgentId, defaultGroupId }`。
+- 创建成功后进入 IM 页面，默认进入 P2P 会话（human ↔ assistant）。
 
-- 进入会话并清除未读：前端打开某 group 后，可调用 `GET /api/groups/:id/messages` 拉消息的同时，让后端更新 `group_members.last_read_message_id`；随后 `getGroups` 返回的 unreadCount 应变为 0，列表红点消失。
+### 2) 非首次进入 / 已有 Workspace
+- 首页通过 `GET /api/workspaces` 拉取列表；用户选择后进入 IM 页面。
+
+### 2) 页面初始化 / 刷新加载
+- **会话列表**：`GET /api/groups?workspaceId=...&agentId=...`  
+  返回群列表 + `unreadCount` + `lastMessage` + `updatedAt`，按时间排序。
+- **当前会话历史**：`GET /api/groups/:id/messages`  
+  拉取全量消息用于恢复消息区。
+- **Agent 上下文流**：`GET /api/agents/:id/context-stream`（SSE）  
+  该 GET 为幂等拉取：每次连接都会从头重放所有历史 chunk，并继续推送实时 `agent.stream` / `agent.done`。
+- **llm-context 流事件类型与结构**（SSE `data:` JSON）
+  - `agent.stream`：增量 chunk  
+    `{ event: "agent.stream", data: { kind: "content"|"reasoning"|"tool_calls", delta: string, tool_call_id?: string, tool_call_name?: string } }`
+  - `agent.done`：本次推理结束  
+    `{ event: "agent.done", data: { finishReason?: "stop"|"tool_calls"|"continue"|string } }`
+  - `agent.error`：错误事件  
+    `{ event: "agent.error", data: { message: string } }`
+  - **流来源说明**：
+    - agent 发起 LLM call 后进入流式推理阶段，逐 chunk 写入 Realtime channel（或内存 bus）。
+    - 推理过程中不会立刻改写持久化 context（`llm_history`），避免“半成品”污染。
+    - 流结束（`agent.done`）后，才将完整 assistant 输出追加到持久化 context，并同步写入 `messages`。
+- **UI 事件流（可选）**：`GET /api/ui-stream?workspaceId=...`（SSE）  
+  仅订阅当前 workspace 的更新提示，不承载完整消息数据，也不要求可恢复。
+  触发场景（仅 send / create）：
+  - 新消息写入（human/agent）：`ui.message.created`
+  - 新群创建：`ui.group.created`
+  - 新 agent 创建：`ui.agent.created`
+  UI 事件到达后的前端动作：
+  - 拉取侧边栏会话列表：`GET /api/groups?workspaceId=...&agentId=...`
+  - 拉取当前打开的会话：`GET /api/groups/:id/messages`
+
+### 3) 发送消息
+- `POST /api/groups/:groupId/messages`  
+  `body: { senderId, content, contentType }`
+- 成功后后端唤醒目标 agent；流式推理通过 SSE 下行。
+
+### 4) 搜索与建群
+- `GET /api/search?workspaceId=...&q=...` 返回 agents/humans。
+- 交互规则：
+  - 单选一个 agent：视为创建/打开该 agent 与 human 的 P2P 群；若已存在则复用，不新建。
+  - 多选多个 agent：当用户在选择控件失焦（unfocus）后，弹出确认框询问是否创建群；确认后再创建。
+- `POST /api/groups { workspaceId, memberIds, name? }` 仅用于“确认创建”场景。
+
+### 5) SSE 断线重连
+- `context-stream` 为幂等 GET：断线后直接重新连接即可，服务端从头重放历史并继续实时推送。
+- `ui-stream` 仅通知实时事件，无需历史重放，断线后直接重连即可。
+
+## IM 工具接口（Agent 可用）
+
+为避免模型触达系统内部核心对象，仅提供必要的 IM 工具：
+- `list_groups()`：返回该 agent 可见群（默认 human 所在群）。
+- `list_group_members(groupId)`：返回群成员列表。
+- `create_group(memberIds, name?)`：创建群（agent 固定隶属单一 workspace，工具默认在该 workspace 内操作）。
+- `send_group_message(groupId, content, contentType?)`：向群发消息并触发唤醒。
+- `send_direct_message(toAgentId, content, contentType?)`：向某人发消息。实现细节：先定位/创建包含该 agent 的 P2P 群，再向该群发送；返回结果需标明使用了哪种通道（复用已有群 / 新建群）。
+- `get_group_messages(groupId)`：拉取历史消息（全量）。
+
+## IM 系统 × Agent 系统：关键交互节点（非纯请求）
+
+- **消息写入 → 唤醒机制**
+  - 任意 `send_message` 成功写入后，触发目标 agent 的 wake。
+  - 被唤醒的 agent 进入 `getAllUnread` → LLM 推理 → 产出流式 chunk → 落库。
+  - `getAllUnread` 约定：
+    - 输入：`agentId`（隐式为当前 agent）。
+    - 输出：按 group 聚合的未读批次 `[{ groupId, messages: [...] }]`。
+    - 规则：每个 group 仅返回 `last_read_message_id` 之后的新消息；同一 group 内按 `send_time` 升序。
+    - 处理：agent 读取到未读 batch 后即更新 `last_read_message_id` 到该 batch 最后一条（先标记已读再进入推理）。
+    - 空结果：若无未读返回空数组，runner 进入阻塞等待。
+- **未读拉取与已读回写**
+  - agent 处理未读时，读取 `group_members.last_read_message_id` 作为边界。
+  - 处理完成后更新 `last_read_message_id`，保证后续只处理增量。
+- **流式上下文与消息入库的解耦**
+  - LLM 推理过程中，chunk 实时推送到 `agent.stream`。
+  - 推理完成后才写入完整 assistant 消息到 `messages`（保证消息区一致性）。
+- **Agent → Agent 的消息路径**
+  - agentA 使用 `send_message` 发往包含 agentB 的群。
+  - agentB 的 runner 被唤醒，读取未读并进入推理。
