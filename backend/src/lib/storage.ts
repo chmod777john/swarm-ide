@@ -20,12 +20,156 @@ function initialAgentHistory(input: { agentId: UUID; workspaceId: UUID; role: st
     `Your workspace_id is: ${input.workspaceId}.\n` +
     `Your role is: ${input.role}.\n` +
     `Act strictly as this role when replying. Be concise and helpful.\n` +
-    `If you need to coordinate with other agents, you may use tools like self, list_agents, create, and send.`;
+    `If you need to coordinate with other agents, you may use tools like self, list_agents, create, send, list_groups, list_group_members, create_group, send_group_message, send_direct_message, and get_group_messages.`;
 
   return JSON.stringify([{ role: "system", content }]);
 }
 
 export const store = {
+  async findLatestExactP2PGroupId(input: {
+    workspaceId: UUID;
+    memberA: UUID;
+    memberB: UUID;
+    preferredName?: string | null;
+  }): Promise<UUID | null> {
+    const db = getDb();
+    const a = input.memberA;
+    const b = input.memberB;
+    if (!a || !b || a === b) return null;
+
+    const rows = await db
+      .select({
+        id: groups.id,
+        name: groups.name,
+        createdAt: groups.createdAt,
+        lastMessageTime: dsql<Date | null>`max(${messages.sendTime})`,
+      })
+      .from(groups)
+      .innerJoin(groupMembers, eq(groupMembers.groupId, groups.id))
+      .leftJoin(messages, eq(messages.groupId, groups.id))
+      .where(eq(groups.workspaceId, input.workspaceId))
+      .groupBy(groups.id)
+      .having(
+        dsql`count(*) = 2 and sum(case when ${groupMembers.userId} = ${a} or ${groupMembers.userId} = ${b} then 1 else 0 end) = 2`
+      );
+
+    if (rows.length === 0) return null;
+
+    const preferred = (input.preferredName ?? null) || null;
+    rows.sort((x, y) => {
+      const xName = x.name ?? null;
+      const yName = y.name ?? null;
+      const xMatch = preferred && xName === preferred ? 1 : 0;
+      const yMatch = preferred && yName === preferred ? 1 : 0;
+      if (xMatch !== yMatch) return yMatch - xMatch;
+
+      const xNamed = xName ? 1 : 0;
+      const yNamed = yName ? 1 : 0;
+      if (xNamed !== yNamed) return yNamed - xNamed;
+
+      const xUpdated = (x.lastMessageTime ?? x.createdAt).getTime();
+      const yUpdated = (y.lastMessageTime ?? y.createdAt).getTime();
+      if (xUpdated !== yUpdated) return yUpdated - xUpdated;
+
+      return y.createdAt.getTime() - x.createdAt.getTime();
+    });
+
+    return rows[0]!.id;
+  },
+
+  async mergeDuplicateExactP2PGroups(input: {
+    workspaceId: UUID;
+    memberA: UUID;
+    memberB: UUID;
+    preferredName?: string | null;
+  }): Promise<UUID | null> {
+    const db = getDb();
+    const a = input.memberA;
+    const b = input.memberB;
+    if (!a || !b || a === b) return null;
+
+    const createdAt = now();
+
+    return await db.transaction(async (tx) => {
+      const rows = await tx
+        .select({
+          id: groups.id,
+          name: groups.name,
+          createdAt: groups.createdAt,
+          lastMessageTime: dsql<Date | null>`max(${messages.sendTime})`,
+        })
+        .from(groups)
+        .innerJoin(groupMembers, eq(groupMembers.groupId, groups.id))
+        .leftJoin(messages, eq(messages.groupId, groups.id))
+        .where(eq(groups.workspaceId, input.workspaceId))
+        .groupBy(groups.id)
+        .having(
+          dsql`count(*) = 2 and sum(case when ${groupMembers.userId} = ${a} or ${groupMembers.userId} = ${b} then 1 else 0 end) = 2`
+        );
+
+      const preferred = (input.preferredName ?? null) || null;
+
+      const pickBest = (candidates: typeof rows) => {
+        const sorted = [...candidates];
+        sorted.sort((x, y) => {
+          const xName = x.name ?? null;
+          const yName = y.name ?? null;
+          const xMatch = preferred && xName === preferred ? 1 : 0;
+          const yMatch = preferred && yName === preferred ? 1 : 0;
+          if (xMatch !== yMatch) return yMatch - xMatch;
+
+          const xNamed = xName ? 1 : 0;
+          const yNamed = yName ? 1 : 0;
+          if (xNamed !== yNamed) return yNamed - xNamed;
+
+          const xUpdated = (x.lastMessageTime ?? x.createdAt).getTime();
+          const yUpdated = (y.lastMessageTime ?? y.createdAt).getTime();
+          if (xUpdated !== yUpdated) return yUpdated - xUpdated;
+
+          return y.createdAt.getTime() - x.createdAt.getTime();
+        });
+        return sorted[0]!;
+      };
+
+      let keepId: UUID | null = null;
+
+      if (rows.length === 0) {
+        keepId = uuid();
+        await tx.insert(groups).values({
+          id: keepId,
+          workspaceId: input.workspaceId,
+          name: preferred || null,
+          createdAt,
+        });
+        await tx.insert(groupMembers).values([
+          { groupId: keepId, userId: a, lastReadMessageId: null, joinedAt: createdAt },
+          { groupId: keepId, userId: b, lastReadMessageId: null, joinedAt: createdAt },
+        ]);
+        return keepId;
+      }
+
+      const best = pickBest(rows);
+      keepId = best.id;
+
+      const others = rows.filter((r) => r.id !== keepId).map((r) => r.id);
+      for (const otherId of others) {
+        await tx
+          .update(messages)
+          .set({ groupId: keepId })
+          .where(and(eq(messages.workspaceId, input.workspaceId), eq(messages.groupId, otherId)));
+
+        await tx.delete(groupMembers).where(eq(groupMembers.groupId, otherId));
+        await tx.delete(groups).where(eq(groups.id, otherId));
+      }
+
+      if (preferred && (best.name ?? null) !== preferred) {
+        await tx.update(groups).set({ name: preferred }).where(eq(groups.id, keepId));
+      }
+
+      return keepId;
+    });
+  },
+
   async listWorkspaces(): Promise<Array<{ id: UUID; name: string; createdAt: string }>> {
     const db = getDb();
     const rows = await db
@@ -435,23 +579,45 @@ export const store = {
         : null,
     ].filter(Boolean) as UUID[];
 
-    const existing =
-      input.newThread === true
-        ? null
-        : await this.findLatestExactGroupId({
-            workspaceId: input.workspaceId,
-            memberIds,
-          });
-
-    const groupId =
-      existing ??
-      (
+    let groupId: UUID;
+    if (input.newThread === true) {
+      groupId = (
         await this.createGroup({
           workspaceId: input.workspaceId,
           memberIds,
           name: input.groupName ?? undefined,
         })
       ).id;
+    } else if (memberIds.length === 2) {
+      groupId =
+        (await this.mergeDuplicateExactP2PGroups({
+          workspaceId: input.workspaceId,
+          memberA: memberIds[0]!,
+          memberB: memberIds[1]!,
+          preferredName: input.groupName ?? null,
+        })) ??
+        (
+          await this.createGroup({
+            workspaceId: input.workspaceId,
+            memberIds,
+            name: input.groupName ?? undefined,
+          })
+        ).id;
+    } else {
+      const existing = await this.findLatestExactGroupId({
+        workspaceId: input.workspaceId,
+        memberIds,
+      });
+      groupId =
+        existing ??
+        (
+          await this.createGroup({
+            workspaceId: input.workspaceId,
+            memberIds,
+            name: input.groupName ?? undefined,
+          })
+        ).id;
+    }
 
     const message = await this.sendMessage({
       groupId,

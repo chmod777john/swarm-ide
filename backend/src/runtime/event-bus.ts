@@ -2,14 +2,31 @@ type AgentEvent =
   | {
       id: number;
       at: number;
-      event: "agent.history";
-      data: { history: Array<{ role: string; content: string }> };
+      event: "agent.wakeup";
+      data: { agentId: string; reason?: string | null };
+    }
+  | {
+      id: number;
+      at: number;
+      event: "agent.unread";
+      data: {
+        agentId: string;
+        batches: Array<{
+          groupId: string;
+          messageIds: string[];
+        }>;
+      };
     }
   | {
       id: number;
       at: number;
       event: "agent.stream";
-      data: { kind: "reasoning" | "content"; delta: string };
+      data: {
+        kind: "reasoning" | "content" | "tool_calls" | "tool_result";
+        delta: string;
+        tool_call_id?: string;
+        tool_call_name?: string;
+      };
     }
   | {
       id: number;

@@ -5,19 +5,19 @@ import { useState } from "react";
 const SESSION_KEY = "agent-wechat.session.v1";
 
 export default function ClearDbButton() {
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<"pg" | "rt" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  async function onClear() {
+  async function onClearPostgres() {
     if (busy) return;
     setError(null);
 
     const ok = window.confirm(
-      "This will DELETE all workspaces, agents, groups, and messages. Continue?"
+      "This will DELETE all workspaces, agents, groups, and messages in Postgres. Continue?"
     );
     if (!ok) return;
 
-    setBusy(true);
+    setBusy("pg");
     try {
       await fetch("/api/admin/clear-db", { method: "POST" });
       await fetch("/api/admin/init-db", { method: "POST" });
@@ -30,14 +30,36 @@ export default function ClearDbButton() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setBusy(false);
+      setBusy(null);
+    }
+  }
+
+  async function onClearRealtime() {
+    if (busy) return;
+    setError(null);
+
+    const ok = window.confirm(
+      "This will DELETE all agent/ui stream history in Upstash. Continue?"
+    );
+    if (!ok) return;
+
+    setBusy("rt");
+    try {
+      await fetch("/api/admin/clear-realtime", { method: "POST" });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
     }
   }
 
   return (
     <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-      <button className="btn" onClick={() => void onClear()} disabled={busy}>
-        {busy ? "Clearing..." : "Clear DB"}
+      <button className="btn" onClick={() => void onClearPostgres()} disabled={busy !== null}>
+        {busy === "pg" ? "Clearing..." : "Clear Postgres"}
+      </button>
+      <button className="btn" onClick={() => void onClearRealtime()} disabled={busy !== null}>
+        {busy === "rt" ? "Clearing..." : "Clear Realtime"}
       </button>
       {error ? (
         <span className="muted" style={{ color: "#fecaca", fontSize: 13 }}>
@@ -47,4 +69,3 @@ export default function ClearDbButton() {
     </div>
   );
 }
-

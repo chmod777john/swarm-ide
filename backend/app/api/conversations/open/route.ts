@@ -16,16 +16,47 @@ export async function POST(req: Request) {
     return Response.json({ error: "memberIds must have >= 2 members" }, { status: 400 });
   }
 
-  const group = await store.createGroup({
+  let groupId: string;
+  let createdAt = new Date().toISOString();
+
+  if (memberIds.length === 2) {
+    groupId =
+      (await store.mergeDuplicateExactP2PGroups({
+        workspaceId,
+        memberA: memberIds[0]!,
+        memberB: memberIds[1]!,
+        preferredName: body?.name ?? null,
+      })) ??
+      (
+        await store.createGroup({
+          workspaceId,
+          memberIds,
+          name: body?.name ?? undefined,
+        })
+      ).id;
+  } else {
+    groupId = (
+      await store.createGroup({
+        workspaceId,
+        memberIds,
+        name: body?.name ?? undefined,
+      })
+    ).id;
+  }
+
+  const groups = await store.listGroups({
     workspaceId,
-    memberIds,
-    name: body?.name ?? undefined,
+    agentId: memberIds[0],
   });
+  const found = groups.find((g) => g.id === groupId);
+  if (found) {
+    createdAt = found.createdAt;
+  }
 
   getWorkspaceUIBus().emit(workspaceId, {
     event: "ui.group.created",
-    data: { workspaceId, group: { id: group.id, name: body?.name ?? null, memberIds } },
+    data: { workspaceId, group: { id: groupId, name: body?.name ?? null, memberIds } },
   });
 
-  return Response.json({ ok: true, groupId: group.id, createdAt: group.createdAt }, { status: 201 });
+  return Response.json({ ok: true, groupId, createdAt }, { status: 201 });
 }

@@ -98,9 +98,16 @@ Agent 详情区：
   拉取全量消息用于恢复消息区。
 - **Agent 上下文流**：`GET /api/agents/:id/context-stream`（SSE）  
   该 GET 为幂等拉取：每次连接都会从头重放所有历史 chunk，并继续推送实时 `agent.stream` / `agent.done`。
+  - **流来源约定**：仅使用 Upstash Realtime channel 回放与实时订阅（无本地 fallback）。
+  - **回放策略**：每次连接统一从 `history.start = "-"` 回放（不使用 `Last-Event-ID` 断点续传）。
+  - **事件范围**：不发送 `agent.history`；历史完全通过 `agent.stream` 的 chunk 回放重建。
 - **llm-context 流事件类型与结构**（SSE `data:` JSON）
   - `agent.stream`：增量 chunk  
-    `{ event: "agent.stream", data: { kind: "content"|"reasoning"|"tool_calls", delta: string, tool_call_id?: string, tool_call_name?: string } }`
+    `{ event: "agent.stream", data: { kind: "content"|"reasoning"|"tool_calls"|"tool_result", delta: string, tool_call_id?: string, tool_call_name?: string } }`
+  - `agent.wakeup`：被唤醒  
+    `{ event: "agent.wakeup", data: { agentId: string, reason?: "manual"|"group_message"|"direct_message"|"context_stream"|string } }`
+  - `agent.unread`：拉取未读概览  
+    `{ event: "agent.unread", data: { agentId: string, batches: [{ groupId: string, messageIds: string[] }] } }`
   - `agent.done`：本次推理结束  
     `{ event: "agent.done", data: { finishReason?: "stop"|"tool_calls"|"continue"|string } }`
   - `agent.error`：错误事件  
@@ -138,7 +145,7 @@ Agent 详情区：
 ## IM 工具接口（Agent 可用）
 
 为避免模型触达系统内部核心对象，仅提供必要的 IM 工具：
-- `list_groups()`：返回该 agent 可见群（默认 human 所在群）。
+- `list_groups()`：返回该 agent 可见群。
 - `list_group_members(groupId)`：返回群成员列表。
 - `create_group(memberIds, name?)`：创建群（agent 固定隶属单一 workspace，工具默认在该 workspace 内操作）。
 - `send_group_message(groupId, content, contentType?)`：向群发消息并触发唤醒。

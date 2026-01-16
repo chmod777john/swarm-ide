@@ -32,6 +32,13 @@ export async function POST(req: Request) {
   const fromRole = await store.getAgentRole({ agentId: fromId }).catch(() => null);
   const toRole = await store.getAgentRole({ agentId: toId }).catch(() => null);
 
+  const inferredGroupName =
+    fromRole === "human" && toRole && toRole !== "human" && toRole !== "assistant"
+      ? toRole
+      : toRole === "human" && fromRole && fromRole !== "human" && fromRole !== "assistant"
+        ? fromRole
+        : null;
+
   const delivered = await store.sendDirectMessage({
     workspaceId,
     fromId,
@@ -40,13 +47,17 @@ export async function POST(req: Request) {
     observerHumanId: observerHumanId || (fromRole === "human" ? fromId : null),
     content,
     contentType: "text",
-    groupName: null,
+    groupName: inferredGroupName,
     newThread: false,
   });
 
+  const memberIds = Array.from(
+    new Set([fromId, toId, observerHumanId].filter(Boolean) as string[])
+  );
+
   getWorkspaceUIBus().emit(workspaceId, {
     event: "ui.group.created",
-    data: { workspaceId, group: { id: delivered.groupId, name: null, memberIds: [fromId, toId, observerHumanId].filter(Boolean) as string[] } },
+    data: { workspaceId, group: { id: delivered.groupId, name: inferredGroupName, memberIds } },
   });
   getWorkspaceUIBus().emit(workspaceId, {
     event: "ui.message.created",

@@ -43,12 +43,28 @@ type Message = {
 };
 
 type AgentStreamEvent =
-  | { event: "agent.history"; data: { history: Array<{ role: string; content: string }> } }
   | {
       id: number;
       at: number;
       event: "agent.stream";
-      data: { kind: "reasoning" | "content"; delta: string };
+      data: {
+        kind: "reasoning" | "content" | "tool_calls" | "tool_result";
+        delta: string;
+        tool_call_id?: string;
+        tool_call_name?: string;
+      };
+    }
+  | {
+      id: number;
+      at: number;
+      event: "agent.wakeup";
+      data: { agentId: string; reason?: string | null };
+    }
+  | {
+      id: number;
+      at: number;
+      event: "agent.unread";
+      data: { agentId: string; batches: Array<{ groupId: string; messageIds: string[] }> };
     }
   | { id: number; at: number; event: "agent.done"; data: { finishReason?: string | null } }
   | { id: number; at: number; event: "agent.error"; data: { message: string } };
@@ -113,9 +129,10 @@ function IMPageInner() {
   const [status, setStatus] = useState<"boot" | "groups" | "messages" | "send" | "idle">("boot");
   const [error, setError] = useState<string | null>(null);
 
-  const [assistantStreamingText, setAssistantStreamingText] = useState("");
-  const [assistantStreamingReasoning, setAssistantStreamingReasoning] = useState("");
-  const [agentHistory, setAgentHistory] = useState<Array<{ role: string; content: string }>>([]);
+  const [streamBlocks, setStreamBlocks] = useState<
+    Array<{ kind: string; label: string; text: string }>
+  >([]);
+  const [rawStreamLog, setRawStreamLog] = useState("");
   const [agentError, setAgentError] = useState<string | null>(null);
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -128,6 +145,10 @@ function IMPageInner() {
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedToAgentId, setSelectedToAgentId] = useState<UUID | null>(null);
   const [selectedGroupMemberIds, setSelectedGroupMemberIds] = useState<UUID[]>([]);
+  const [searchResults, setSearchResults] = useState<{ agents: AgentMeta[]; groups: Group[] }>({
+    agents: [],
+    groups: [],
+  });
   const openingConversationRef = useRef<UUID | null>(null);
 
   const activeGroup = useMemo(
@@ -164,13 +185,16 @@ function IMPageInner() {
     return agents.filter((a) => a.id !== session.humanAgentId);
   }, [agents, session]);
 
-  const filteredAgents = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q) return humanVisibleAgents;
-    return humanVisibleAgents.filter((a) => {
-      return a.role.toLowerCase().includes(q) || a.id.toLowerCase().includes(q);
-    });
-  }, [humanVisibleAgents, searchQuery]);
+  const searchAgents = useMemo(() => {
+    if (!session) return [];
+    if (!searchOpen) return humanVisibleAgents;
+    return searchResults.agents.filter((a) => a.id !== session.humanAgentId);
+  }, [humanVisibleAgents, searchOpen, searchResults.agents, session]);
+
+  const searchGroups = useMemo(() => {
+    if (!searchOpen) return [];
+    return searchResults.groups;
+  }, [searchOpen, searchResults.groups]);
 
   const streamAgentId = useMemo(() => {
     if (!session) return null;
@@ -194,9 +218,8 @@ function IMPageInner() {
 
     setGroups([]);
     setMessages([]);
-    setAssistantStreamingText("");
-    setAssistantStreamingReasoning("");
-    setAgentHistory([]);
+    setStreamBlocks([]);
+    setRawStreamLog("");
     esRef.current?.close();
 
     if (overrideWorkspaceId) {
@@ -288,8 +311,8 @@ function IMPageInner() {
       streamAgentIdRef.current = agentId;
 
       esRef.current?.close();
-      setAssistantStreamingText("");
-      setAssistantStreamingReasoning("");
+      setStreamBlocks([]);
+      setRawStreamLog("");
       setAgentError(null);
 
       const groupId = activeGroupIdRef.current;
@@ -300,16 +323,64 @@ function IMPageInner() {
       es.onmessage = (evt) => {
         try {
           const payload = JSON.parse(evt.data) as AgentStreamEvent;
-          if (payload.event === "agent.history") {
-            setAgentHistory(payload.data.history);
+          if (payload.event === "agent.stream") {
+            const label =
+              payload.data.kind === "tool_calls" || payload.data.kind === "tool_result"
+                ? payload.data.tool_call_name ?? payload.data.tool_call_id ?? "tool_call"
+                : payload.data.kind;
+            const chunk = payload.data.delta;
+            setRawStreamLog((t) =>
+              t
+                ? `${t}\n${label}: ${chunk || ""}`.trimEnd()
+                : `${label}: ${chunk || ""}`.trimEnd()
+            );
+            setStreamBlocks((prev) => {
+              const next = [...prev];
+              const last = next[next.length - 1];
+              if (last && last.kind === payload.data.kind && last.label === label) {
+                last.text = `${last.text}${chunk || ""}`;
+                next[next.length - 1] = last;
+              } else {
+                next.push({ kind: payload.data.kind, label, text: chunk || "" });
+              }
+              return next;
+            });
             return;
           }
-          if (payload.event === "agent.stream") {
-            if (payload.data.kind === "content") {
-              setAssistantStreamingText((t) => t + payload.data.delta);
-            } else {
-              setAssistantStreamingReasoning((t) => t + payload.data.delta);
-            }
+          if (payload.event === "agent.wakeup") {
+            setRawStreamLog((t) =>
+              t
+                ? `${t}\nwakeup: ${payload.data.reason ?? "unknown"}`.trimEnd()
+                : `wakeup: ${payload.data.reason ?? "unknown"}`
+            );
+            setStreamBlocks((prev) => {
+              const next = [...prev];
+              next.push({
+                kind: "wakeup",
+                label: "wakeup",
+                text: payload.data.reason ?? "unknown",
+              });
+              return next;
+            });
+            return;
+          }
+          if (payload.event === "agent.unread") {
+            const batchCount = payload.data.batches.length;
+            const msgCount = payload.data.batches.reduce((sum, b) => sum + b.messageIds.length, 0);
+            setRawStreamLog((t) =>
+              t
+                ? `${t}\nunread: ${batchCount} batches, ${msgCount} messages`.trimEnd()
+                : `unread: ${batchCount} batches, ${msgCount} messages`
+            );
+            setStreamBlocks((prev) => {
+              const next = [...prev];
+              next.push({
+                kind: "unread",
+                label: "unread",
+                text: `${batchCount} batches, ${msgCount} messages`,
+              });
+              return next;
+            });
             return;
           }
           if (payload.event === "agent.done") {
@@ -533,6 +604,27 @@ function IMPageInner() {
   }, [refreshGroups, session]);
 
   useEffect(() => {
+    if (!session || !searchOpen) return;
+    const q = searchQuery.trim();
+    void (async () => {
+      try {
+        const params = new URLSearchParams({
+          workspaceId: session.workspaceId,
+          agentId: session.humanAgentId,
+          q,
+        });
+        const res = await api<{ agents: AgentMeta[]; groups: Group[] }>(
+          `/api/search?${params.toString()}`
+        );
+        setSearchResults({ agents: res.agents, groups: res.groups });
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        setSearchResults({ agents: [], groups: [] });
+      }
+    })();
+  }, [searchOpen, searchQuery, session]);
+
+  useEffect(() => {
     if (!session) return;
     uiEsRef.current?.close();
     const es = new EventSource(`/api/ui-stream?workspaceId=${encodeURIComponent(session.workspaceId)}`);
@@ -625,7 +717,13 @@ function IMPageInner() {
               }}
               onBlur={() => {
                 // allow click selection
-                window.setTimeout(() => setSearchOpen(false), 120);
+                window.setTimeout(() => {
+                  setSearchOpen(false);
+                  if (session && selectedGroupMemberIds.length > 1) {
+                    const confirmed = window.confirm("Create a new group with the selected agents?");
+                    if (confirmed) void createGroupFromSelection();
+                  }
+                }, 120);
               }}
             />
             {searchOpen ? (
@@ -642,37 +740,13 @@ function IMPageInner() {
                 }}
               >
                 <div className="card-title">Agents</div>
-                {selectedGroupMemberIds.length > 0 ? (
-                  <div style={{ padding: 12, paddingTop: 0, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                    <span className="muted" style={{ fontSize: 12 }}>
-                      Selected: {selectedGroupMemberIds.length}
-                    </span>
-                    <button
-                      className="btn btn-primary"
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => void createGroupFromSelection()}
-                      disabled={!session || (status !== "idle" && status !== "boot")}
-                      title="Create a static group with selected members"
-                    >
-                      Create Group
-                    </button>
-                    <button
-                      className="btn"
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => setSelectedGroupMemberIds([])}
-                      disabled={!session || (status !== "idle" && status !== "boot")}
-                    >
-                      Clear
-                    </button>
-                  </div>
-                ) : null}
                 <div style={{ display: "flex", flexDirection: "column" }}>
-                  {filteredAgents.length === 0 ? (
+                  {searchAgents.length === 0 ? (
                     <div className="muted" style={{ padding: 12 }}>
                       No matches.
                     </div>
                   ) : (
-	                    filteredAgents.slice(0, 50).map((a) => (
+	                    searchAgents.slice(0, 50).map((a) => (
 	                      <button
 	                        key={a.id}
 	                        className={cx("row", selectedToAgentId === a.id && "active")}
@@ -766,6 +840,44 @@ function IMPageInner() {
                         </div>
                         <div className="muted mono" style={{ fontSize: 12, marginTop: 6 }}>
                           {a.id}
+                        </div>
+	                      </button>
+                    ))
+                  )}
+                </div>
+
+                <div className="card-title" style={{ marginTop: 12 }}>
+                  Groups
+                </div>
+                <div style={{ display: "flex", flexDirection: "column" }}>
+                  {searchGroups.length === 0 ? (
+                    <div className="muted" style={{ padding: 12 }}>
+                      No matches.
+                    </div>
+                  ) : (
+                    searchGroups.slice(0, 50).map((g) => (
+                      <button
+                        key={g.id}
+                        className={cx("row", g.id === activeGroupId && "active")}
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => {
+                          if (!session) return;
+                          setActiveGroupId(g.id);
+                          const nextAgentId =
+                            g.memberIds.find((id) => id !== session.humanAgentId) ??
+                            session.assistantAgentId;
+                          connectAgentStream(nextAgentId);
+                          setSearchOpen(false);
+                        }}
+                      >
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+                          <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}>
+                            {getGroupLabel(g)}
+                          </div>
+                          {g.unreadCount > 0 && <span className="badge">{g.unreadCount}</span>}
+                        </div>
+                        <div className="muted mono" style={{ fontSize: 12, marginTop: 6 }}>
+                          {g.id.slice(0, 8)}
                         </div>
                       </button>
                     ))
@@ -874,8 +986,8 @@ function IMPageInner() {
           <button
             className="btn"
             onClick={() => {
-              setAssistantStreamingText("");
-              setAssistantStreamingReasoning("");
+              setStreamBlocks([]);
+              setRawStreamLog("");
               setAgentError(null);
             }}
           >
@@ -890,17 +1002,24 @@ function IMPageInner() {
           {agentError ? <div className="toast" style={{ borderColor: "#713f12", background: "rgba(113,63,18,0.25)", color: "#fde68a" }}>{agentError}</div> : null}
 
           <div className="card">
-            <div className="card-title">Context (agents.llm_history)</div>
+            <div className="card-title">Realtime stream</div>
             <div className="card-body mono">
-              {agentHistory.length === 0
+              {streamBlocks.length === 0
                 ? "—"
-                : agentHistory.map((m, i) => `${i + 1}. ${m.role}: ${m.content}`).join("\n\n")}
+                : streamBlocks.map((block, index) => (
+                    <div key={`${block.kind}-${index}`} style={{ marginBottom: 10 }}>
+                      <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>
+                        {block.label}
+                      </div>
+                      <div>{block.text || "—"}</div>
+                    </div>
+                  ))}
             </div>
           </div>
 
           <div className="card">
-            <div className="card-title">Reasoning stream (delta)</div>
-            <div className="card-body mono">{assistantStreamingReasoning || "—"}</div>
+            <div className="card-title">Raw stream</div>
+            <div className="card-body mono">{rawStreamLog || "—"}</div>
           </div>
         </div>
       </section>

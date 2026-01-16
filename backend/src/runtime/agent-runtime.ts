@@ -8,7 +8,12 @@ import { getWorkspaceUIBus } from "./ui-bus";
 type UUID = string;
 
 type HistoryMessage =
-  | { role: "system" | "user" | "assistant"; content: string; tool_calls?: unknown }
+  | {
+      role: "system" | "user" | "assistant";
+      content: string;
+      tool_calls?: unknown;
+      reasoning_content?: string;
+    }
   | { role: "tool"; content: string; tool_call_id?: string; name?: string };
 
 type HistoryByGroup = Record<string, HistoryMessage[]>;
@@ -73,6 +78,95 @@ const AGENT_TOOLS = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "list_groups",
+      description: "List visible groups for this agent.",
+      parameters: { type: "object", additionalProperties: false, properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_group_members",
+      description: "List member ids for a group.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          groupId: { type: "string", description: "Target group id" },
+        },
+        required: ["groupId"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "create_group",
+      description: "Create a group with the given member ids.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          memberIds: { type: "array", items: { type: "string" } },
+          name: { type: "string" },
+        },
+        required: ["memberIds"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "send_group_message",
+      description: "Send a message to a group.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          groupId: { type: "string" },
+          content: { type: "string" },
+          contentType: { type: "string" },
+        },
+        required: ["groupId", "content"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "send_direct_message",
+      description:
+        "Send a direct message to another agent. Creates or reuses a P2P group and returns the channel type.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          toAgentId: { type: "string" },
+          content: { type: "string" },
+          contentType: { type: "string" },
+        },
+        required: ["toAgentId", "content"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_group_messages",
+      description: "Fetch full message history for a group.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          groupId: { type: "string" },
+        },
+        required: ["groupId"],
+      },
+    },
+  },
 ] as const;
 
 function getGlmConfig() {
@@ -107,9 +201,13 @@ class AgentRunner {
     void this.loop();
   }
 
-  wakeup() {
+  wakeup(reason: "manual" | "group_message" | "direct_message" | "context_stream" = "manual") {
     this.wake.resolve();
     this.wake = createDeferred<void>();
+    this.bus.emit(this.agentId, {
+      event: "agent.wakeup",
+      data: { agentId: this.agentId, reason },
+    });
   }
 
   private async loop() {
@@ -136,6 +234,17 @@ class AgentRunner {
     while (true) {
       const batches = await store.listUnreadByGroup({ agentId: this.agentId });
       if (batches.length === 0) return;
+
+      this.bus.emit(this.agentId, {
+        event: "agent.unread",
+        data: {
+          agentId: this.agentId,
+          batches: batches.map((batch) => ({
+            groupId: batch.groupId,
+            messageIds: batch.messages.map((m) => m.id),
+          })),
+        },
+      });
 
       for (const batch of batches) {
         await this.processGroupUnread(batch.groupId, batch.messages);
@@ -171,7 +280,7 @@ class AgentRunner {
           `Your workspace_id is: ${workspaceId}.\n` +
           `Your role is: ${role}.\n` +
           `Act strictly as this role when replying. Be concise and helpful.\n` +
-          `If you need to coordinate with other agents, you may use tools like self, list_agents, create, and send.`,
+          `If you need to coordinate with other agents, you may use tools like self, list_agents, create, send, list_groups, list_group_members, create_group, send_group_message, send_direct_message, and get_group_messages.`,
       });
     }
 
@@ -180,9 +289,7 @@ class AgentRunner {
       .join("\n");
     history.push({ role: "user", content: userContent });
 
-    this.bus.emit(this.agentId, { event: "agent.history", data: { history } });
-
-    const { assistantText } = await this.runWithTools({ groupId, history });
+    const { assistantText, assistantThinking } = await this.runWithTools({ groupId, history });
 
     if (assistantText.trim()) {
       await store.sendMessage({
@@ -193,7 +300,11 @@ class AgentRunner {
       });
     }
 
-    history.push({ role: "assistant", content: assistantText });
+    history.push({
+      role: "assistant",
+      content: assistantText,
+      reasoning_content: assistantThinking || undefined,
+    });
     historyByGroup[groupId] = history;
     await store.setAgentHistory({
       agentId: this.agentId,
@@ -209,13 +320,15 @@ class AgentRunner {
   private async runWithTools(input: { groupId: UUID; history: HistoryMessage[] }) {
     const maxToolRounds = 3;
     let assistantText = "";
+    let assistantThinking = "";
 
     for (let round = 0; round < maxToolRounds; round++) {
       const res = await this.callGlmStreaming(input.history);
       assistantText = res.assistantText;
+      assistantThinking = res.assistantThinking;
 
       if (res.toolCalls.length === 0) {
-        return { assistantText };
+        return { assistantText, assistantThinking };
       }
 
       input.history.push({
@@ -226,12 +339,22 @@ class AgentRunner {
           type: "function",
           function: { name: c.name, arguments: c.argumentsText },
         })),
+        reasoning_content: res.assistantThinking || undefined,
       });
 
       for (const call of res.toolCalls) {
         const result = await this.executeToolCall({
           groupId: input.groupId,
           call,
+        });
+        this.bus.emit(this.agentId, {
+          event: "agent.stream",
+          data: {
+            kind: "tool_result",
+            delta: JSON.stringify(result),
+            tool_call_id: call.id,
+            tool_call_name: call.name,
+          },
         });
         input.history.push({
           role: "tool",
@@ -241,10 +364,9 @@ class AgentRunner {
         });
       }
 
-      this.bus.emit(this.agentId, { event: "agent.history", data: { history: input.history } });
     }
 
-    return { assistantText };
+    return { assistantText, assistantThinking };
   }
 
   private async executeToolCall(input: { groupId: UUID; call: ToolCall }) {
@@ -303,6 +425,126 @@ class AgentRunner {
       return { ok: true, ...delivered };
     }
 
+    if (name === "list_groups") {
+      const groups = await store.listGroups({ workspaceId, agentId: this.agentId });
+      return { ok: true, groups };
+    }
+
+    if (name === "list_group_members") {
+      const args = safeJsonParse<{ groupId?: string }>(input.call.argumentsText, {});
+      const groupId = (args.groupId ?? "").trim();
+      if (!groupId) return { ok: false, error: "Missing groupId" };
+      const members = await store.listGroupMemberIds({ groupId });
+      if (!members.includes(this.agentId)) {
+        return { ok: false, error: "Access denied" };
+      }
+      return { ok: true, members };
+    }
+
+    if (name === "create_group") {
+      const args = safeJsonParse<{ memberIds?: string[]; name?: string }>(input.call.argumentsText, {});
+      const memberIds = (args.memberIds ?? []).map((id) => id.trim()).filter(Boolean);
+      if (memberIds.length < 2) return { ok: false, error: "memberIds must have >= 2 members" };
+      if (!memberIds.includes(this.agentId)) {
+        memberIds.push(this.agentId);
+      }
+      const created = await store.createGroup({ workspaceId, memberIds, name: args.name ?? undefined });
+      getWorkspaceUIBus().emit(workspaceId, {
+        event: "ui.group.created",
+        data: { workspaceId, group: { id: created.id, name: created.name, memberIds } },
+      });
+      return { ok: true, groupId: created.id, name: created.name };
+    }
+
+    if (name === "send_group_message") {
+      const args = safeJsonParse<{ groupId?: string; content?: string; contentType?: string }>(
+        input.call.argumentsText,
+        {}
+      );
+      const groupId = (args.groupId ?? "").trim();
+      const content = (args.content ?? "").trim();
+      if (!groupId) return { ok: false, error: "Missing groupId" };
+      if (!content) return { ok: false, error: "Missing content" };
+
+      const members = await store.listGroupMemberIds({ groupId });
+      if (!members.includes(this.agentId)) {
+        return { ok: false, error: "Access denied" };
+      }
+
+      const result = await store.sendMessage({
+        groupId,
+        senderId: this.agentId,
+        content,
+        contentType: args.contentType ?? "text",
+      });
+
+      getWorkspaceUIBus().emit(workspaceId, {
+        event: "ui.message.created",
+        data: { workspaceId, groupId, message: { id: result.id, senderId: this.agentId, sendTime: result.sendTime } },
+      });
+
+      for (const memberId of members) {
+        if (memberId === this.agentId) continue;
+        const role = await store.getAgentRole({ agentId: memberId }).catch(() => null);
+        if (role === "human" || role === null) continue;
+        this.ensureRunner(memberId);
+        this.wakeAgent(memberId);
+      }
+
+      return { ok: true, ...result };
+    }
+
+    if (name === "send_direct_message") {
+      const args = safeJsonParse<{ toAgentId?: string; content?: string; contentType?: string }>(
+        input.call.argumentsText,
+        {}
+      );
+      const toAgentId = (args.toAgentId ?? "").trim();
+      const content = (args.content ?? "").trim();
+      if (!toAgentId) return { ok: false, error: "Missing toAgentId" };
+      if (!content) return { ok: false, error: "Missing content" };
+
+      const existing = await store.findLatestExactP2PGroupId({
+        workspaceId,
+        memberA: this.agentId,
+        memberB: toAgentId,
+        preferredName: null,
+      });
+      const groupId =
+        existing ??
+        (
+          await store.createGroup({
+            workspaceId,
+            memberIds: [this.agentId, toAgentId],
+          })
+        ).id;
+      const channel = existing ? "reuse_existing_group" : "new_group";
+
+      const result = await store.sendMessage({
+        groupId,
+        senderId: this.agentId,
+        content,
+        contentType: args.contentType ?? "text",
+      });
+
+      this.ensureRunner(toAgentId);
+      this.wakeAgent(toAgentId);
+
+      return { ok: true, channel, groupId, messageId: result.id, sendTime: result.sendTime };
+    }
+
+    if (name === "get_group_messages") {
+      const args = safeJsonParse<{ groupId?: string }>(input.call.argumentsText, {});
+      const groupId = (args.groupId ?? "").trim();
+      if (!groupId) return { ok: false, error: "Missing groupId" };
+      const members = await store.listGroupMemberIds({ groupId });
+      if (!members.includes(this.agentId)) {
+        return { ok: false, error: "Access denied" };
+      }
+      const messages = await store.listMessages({ groupId });
+      return { ok: true, messages };
+    }
+
     return { ok: false, error: `Unknown tool: ${name}` };
   }
 
@@ -333,15 +575,17 @@ class AgentRunner {
     const assembler = new GLMStreamAssembler();
     let prev = assembler.snapshot();
     let assistantText = "";
+    let assistantThinking = "";
 
     for await (const evt of parseSSEJsonLines(upstream.body)) {
       const state = assembler.push(evt as any);
 
       const reasoningDelta = state.reasoningContent.slice(prev.reasoningContent.length);
       const contentDelta = state.content.slice(prev.content.length);
-      prev = state;
+      const toolCallDeltas = extractToolCallDeltas(evt as any, prev, state);
 
       if (reasoningDelta) {
+        assistantThinking += reasoningDelta;
         this.bus.emit(this.agentId, {
           event: "agent.stream",
           data: { kind: "reasoning", delta: reasoningDelta },
@@ -355,6 +599,20 @@ class AgentRunner {
           data: { kind: "content", delta: contentDelta },
         });
       }
+
+      for (const delta of toolCallDeltas) {
+        this.bus.emit(this.agentId, {
+          event: "agent.stream",
+          data: {
+            kind: "tool_calls",
+            delta: delta.delta,
+            tool_call_id: delta.tool_call_id,
+            tool_call_name: delta.tool_call_name,
+          },
+        });
+      }
+
+      prev = state;
     }
 
     this.bus.emit(this.agentId, {
@@ -365,10 +623,54 @@ class AgentRunner {
     const finalState = assembler.snapshot();
     return {
       assistantText,
+      assistantThinking,
       toolCalls: (finalState.toolCalls ?? []) as ToolCall[],
       finishReason: finalState.finishReason,
     };
   }
+}
+
+function extractToolCallDeltas(
+  chunk: {
+    choices?: Array<{
+      delta?: {
+        tool_calls?: Array<{
+          index?: number;
+          id?: string;
+          function?: { name?: string; arguments?: string };
+        }>;
+      };
+    }>;
+  },
+  prevState: { toolCalls: Array<{ index: number; id?: string; name?: string; argumentsText: string }> },
+  nextState: { toolCalls: Array<{ index: number; id?: string; name?: string; argumentsText: string }> }
+): Array<{ delta: string; tool_call_id?: string; tool_call_name?: string }> {
+  const deltas: Array<{ delta: string; tool_call_id?: string; tool_call_name?: string }> = [];
+  const toolCalls = chunk.choices?.[0]?.delta?.tool_calls ?? [];
+  if (toolCalls.length === 0) return deltas;
+
+  const prevByIndex = new Map(prevState.toolCalls.map((call) => [call.index, call]));
+  const nextByIndex = new Map(nextState.toolCalls.map((call) => [call.index, call]));
+
+  for (const call of toolCalls) {
+    const index = call.index ?? 0;
+    const prev = prevByIndex.get(index);
+    const next = nextByIndex.get(index);
+    const name = call.function?.name ?? next?.name;
+    const id = call.id ?? next?.id;
+    const argsChunk = call.function?.arguments ?? "";
+
+    if (argsChunk) {
+      deltas.push({ delta: argsChunk, tool_call_id: id, tool_call_name: name });
+      continue;
+    }
+
+    if (name && name !== prev?.name) {
+      deltas.push({ delta: "", tool_call_id: id, tool_call_name: name });
+    }
+  }
+
+  return deltas;
 }
 
 export class AgentRuntime {
@@ -398,7 +700,7 @@ export class AgentRuntime {
         this.ensureRunner(id);
       },
       (id) => {
-        this.ensureRunner(id).wakeup();
+        this.ensureRunner(id).wakeup("manual");
       }
     );
     this.runners.set(agentId, runner);
@@ -414,13 +716,13 @@ export class AgentRuntime {
       if (memberId === senderId) continue;
       const role = await store.getAgentRole({ agentId: memberId }).catch(() => null);
       if (role === "human" || role === null) continue;
-      this.ensureRunner(memberId).wakeup();
+      this.ensureRunner(memberId).wakeup("group_message");
     }
   }
 
-  async wakeAgent(agentId: UUID) {
+  async wakeAgent(agentId: UUID, reason: "direct_message" | "context_stream" = "direct_message") {
     await this.bootstrap();
-    this.ensureRunner(agentId).wakeup();
+    this.ensureRunner(agentId).wakeup(reason);
   }
 }
 
