@@ -132,19 +132,17 @@ function IMPageInner() {
   const [contentStream, setContentStream] = useState("");
   const [reasoningStream, setReasoningStream] = useState("");
   const [toolStream, setToolStream] = useState("");
-  const [streamBlocks, setStreamBlocks] = useState<
-    Array<{ kind: string; label: string; text: string; runId: number }>
-  >([]);
-  const [rawStreamLog, setRawStreamLog] = useState("");
+  const [llmHistory, setLlmHistory] = useState("");
   const [agentError, setAgentError] = useState<string | null>(null);
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const esRef = useRef<EventSource | null>(null);
   const activeGroupIdRef = useRef<string | null>(null);
   const streamAgentIdRef = useRef<string | null>(null);
-  const streamRunIdRef = useRef(0);
-  const lastToolKeyRef = useRef<string | null>(null);
+  const toolCallBuffersRef = useRef<Map<string, string>>(new Map());
+  const toolResultBuffersRef = useRef<Map<string, string>>(new Map());
   const uiEsRef = useRef<EventSource | null>(null);
+  const llmHistoryReqIdRef = useRef(0);
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -216,6 +214,31 @@ function IMPageInner() {
     setAgents(agents);
   }, []);
 
+  const formatLlmHistory = useCallback((raw: string) => {
+    try {
+      return JSON.stringify(JSON.parse(raw), null, 2);
+    } catch {
+      return raw;
+    }
+  }, []);
+
+  const refreshLlmHistory = useCallback(
+    async (agentId: string) => {
+      const reqId = (llmHistoryReqIdRef.current += 1);
+      try {
+        const res = await api<{ llmHistory: string }>(`/api/agents/${agentId}`);
+        if (reqId !== llmHistoryReqIdRef.current) return;
+        setLlmHistory(formatLlmHistory(res.llmHistory));
+      } catch (e) {
+        if (reqId !== llmHistoryReqIdRef.current) return;
+        setLlmHistory(
+          e instanceof Error ? `(failed to load llm_history: ${e.message})` : "(failed to load llm_history)"
+        );
+      }
+    },
+    [formatLlmHistory]
+  );
+
   const bootstrap = useCallback(async (overrideWorkspaceId: string | null) => {
     setError(null);
     setAgentError(null);
@@ -223,8 +246,7 @@ function IMPageInner() {
 
     setGroups([]);
     setMessages([]);
-    setStreamBlocks([]);
-    setRawStreamLog("");
+    setLlmHistory("");
     esRef.current?.close();
 
     if (overrideWorkspaceId) {
@@ -316,14 +338,13 @@ function IMPageInner() {
       streamAgentIdRef.current = agentId;
 
       esRef.current?.close();
-      setStreamBlocks([]);
-      setRawStreamLog("");
+      setLlmHistory("");
       setContentStream("");
       setReasoningStream("");
       setToolStream("");
       setAgentError(null);
-      streamRunIdRef.current = 0;
-      lastToolKeyRef.current = null;
+      toolCallBuffersRef.current = new Map();
+      toolResultBuffersRef.current = new Map();
 
       const groupId = activeGroupIdRef.current;
       const suffix = groupId ? `?groupId=${encodeURIComponent(groupId)}` : "";
@@ -334,114 +355,57 @@ function IMPageInner() {
         try {
           const payload = JSON.parse(evt.data) as AgentStreamEvent;
           if (payload.event === "agent.stream") {
-            const label =
-              payload.data.kind === "tool_calls" || payload.data.kind === "tool_result"
-                ? payload.data.tool_call_name ?? payload.data.tool_call_id ?? "tool_call"
-                : payload.data.kind;
             const chunk = payload.data.delta;
-            const runId = streamRunIdRef.current;
-            if (payload.data.kind === "reasoning") {
-              console.log("----");
-              console.log(chunk || "");
-              console.log("----");
-            }
-            setRawStreamLog((t) =>
-              t
-                ? `${t}\n${label}: ${chunk || ""}`.trimEnd()
-                : `${label}: ${chunk || ""}`.trimEnd()
-            );
             if (chunk) {
               if (payload.data.kind === "content") {
                 setContentStream((t) => t + chunk);
               } else if (payload.data.kind === "reasoning") {
                 setReasoningStream((t) => t + chunk);
               } else {
-                const toolKey = payload.data.tool_call_id ?? payload.data.tool_call_name ?? "tool_call";
-                setToolStream((t) => {
-                  const needsSeparator = lastToolKeyRef.current !== toolKey;
-                  lastToolKeyRef.current = toolKey;
-                  const prefix = needsSeparator ? `${t ? "\n\n" : ""}${label}: ` : "";
-                  return `${t}${prefix}${chunk}`;
-                });
+                const name = payload.data.tool_call_name ?? payload.data.tool_call_id ?? "tool_call";
+                const key = payload.data.tool_call_id ?? name;
+                const buffers =
+                  payload.data.kind === "tool_result"
+                    ? toolResultBuffersRef.current
+                    : toolCallBuffersRef.current;
+                const next = `${buffers.get(key) ?? ""}${chunk}`;
+                buffers.set(key, next);
+                const callLines = Array.from(toolCallBuffersRef.current.entries()).map(
+                  ([id, value]) => `tool_calls[${id}]: ${value}`
+                );
+                const resultLines = Array.from(toolResultBuffersRef.current.entries()).map(
+                  ([id, value]) => `tool_result[${id}]: ${value}`
+                );
+                setToolStream([...callLines, ...resultLines].join("\n\n"));
               }
             }
-            setStreamBlocks((prev) => {
-              const next = [...prev];
-              const last = next[next.length - 1];
-              if (last && last.kind === payload.data.kind && last.label === label && last.runId === runId) {
-                last.text = `${last.text}${chunk || ""}`;
-                next[next.length - 1] = last;
-              } else {
-                next.push({ kind: payload.data.kind, label, text: chunk || "", runId });
-              }
-              return next;
-            });
             return;
           }
           if (payload.event === "agent.wakeup") {
-            streamRunIdRef.current += 1;
-            lastToolKeyRef.current = null;
             setContentStream("");
             setReasoningStream("");
             setToolStream("");
-            setRawStreamLog((t) =>
-              t
-                ? `${t}\nwakeup: ${payload.data.reason ?? "unknown"}`.trimEnd()
-                : `wakeup: ${payload.data.reason ?? "unknown"}`
-            );
-            setStreamBlocks((prev) => {
-              const next = [...prev];
-              next.push({
-                kind: "wakeup",
-                label: "wakeup",
-                text: payload.data.reason ?? "unknown",
-                runId: streamRunIdRef.current,
-              });
-              return next;
-            });
+            toolCallBuffersRef.current = new Map();
+            toolResultBuffersRef.current = new Map();
             return;
           }
           if (payload.event === "agent.unread") {
-            const batchCount = payload.data.batches.length;
-            const msgCount = payload.data.batches.reduce((sum, b) => sum + b.messageIds.length, 0);
-            lastToolKeyRef.current = null;
             setContentStream("");
             setReasoningStream("");
             setToolStream("");
-            setRawStreamLog((t) =>
-              t
-                ? `${t}\nunread: ${batchCount} batches, ${msgCount} messages`.trimEnd()
-                : `unread: ${batchCount} batches, ${msgCount} messages`
-            );
-            setStreamBlocks((prev) => {
-              const next = [...prev];
-              next.push({
-                kind: "unread",
-                label: "unread",
-                text: `${batchCount} batches, ${msgCount} messages`,
-                runId: streamRunIdRef.current,
-              });
-              return next;
-            });
+            toolCallBuffersRef.current = new Map();
+            toolResultBuffersRef.current = new Map();
             return;
           }
           if (payload.event === "agent.done") {
-            setRawStreamLog((t) => (t ? `${t}\n—` : "—"));
-            setStreamBlocks((prev) => {
-              const next = [...prev];
-              next.push({
-                kind: "done",
-                label: "done",
-                text: "—",
-                runId: streamRunIdRef.current,
-              });
-              return next;
-            });
-            lastToolKeyRef.current = null;
+            toolCallBuffersRef.current = new Map();
+            toolResultBuffersRef.current = new Map();
             const groupId = activeGroupIdRef.current;
             const nextSession = loadSession();
             if (nextSession && groupId) void refreshMessages(nextSession, groupId, { markRead: false });
             if (nextSession) void refreshGroups(nextSession);
+            const agentId = streamAgentIdRef.current;
+            if (agentId) void refreshLlmHistory(agentId);
             return;
           }
           if (payload.event === "agent.error") {
@@ -600,14 +564,26 @@ function IMPageInner() {
         !!activeGroup?.memberIds?.includes(session.humanAgentId);
 
       if (targetId && !activeHasTarget) {
-        const opened = await api<{ id: string; name: string | null }>(`/api/groups`, {
-          method: "POST",
-          body: JSON.stringify({
-            workspaceId: session.workspaceId,
-            memberIds: [session.humanAgentId, targetId],
-            name: null,
-          }),
-        });
+        const candidates = groups
+          .filter(
+            (g) =>
+              g.memberIds.includes(session.humanAgentId) &&
+              g.memberIds.includes(targetId) &&
+              g.memberIds.length === 2
+          )
+          .sort((x, y) => y.updatedAt.localeCompare(x.updatedAt));
+
+        const opened =
+          candidates[0] ??
+          (await api<{ id: string; name: string | null }>(`/api/groups`, {
+            method: "POST",
+            body: JSON.stringify({
+              workspaceId: session.workspaceId,
+              memberIds: [session.humanAgentId, targetId],
+              name: null,
+            }),
+          }));
+
         await api(`/api/groups/${opened.id}/messages`, {
           method: "POST",
           body: JSON.stringify({ senderId: session.humanAgentId, content: text, contentType: "text" }),
@@ -615,9 +591,9 @@ function IMPageInner() {
         setStatus("idle");
         setSelectedToAgentId(null);
         setSearchQuery("");
-        void refreshGroups(session);
         setActiveGroupId(opened.id);
         connectAgentStream(targetId);
+        void refreshGroups(session);
         return;
       }
 
@@ -625,6 +601,8 @@ function IMPageInner() {
         method: "POST",
         body: JSON.stringify({ senderId: session.humanAgentId, content: text, contentType: "text" }),
       });
+      setSelectedToAgentId(null);
+      setSearchQuery("");
     } finally {
       // keep going
     }
@@ -641,6 +619,7 @@ function IMPageInner() {
     refreshGroups,
     refreshMessages,
     selectedToAgentId,
+    groups,
     session,
   ]);
 
@@ -691,18 +670,24 @@ function IMPageInner() {
       // any change in workspace => refresh lists (cheap enough for MVP)
       void refreshGroups(session);
       void refreshAgents(session);
+      if (streamAgentId) void refreshLlmHistory(streamAgentId);
+      if (activeGroupIdRef.current) {
+        void refreshMessages(session, activeGroupIdRef.current, { markRead: false });
+      }
     };
     es.onerror = () => {
       // tolerate disconnects; user can refresh manually
     };
 
     return () => es.close();
-  }, [refreshAgents, refreshGroups, session]);
+  }, [refreshAgents, refreshGroups, refreshLlmHistory, session, streamAgentId]);
 
   useEffect(() => {
     if (!streamAgentId) return;
     connectAgentStream(streamAgentId);
-  }, [connectAgentStream, streamAgentId]);
+    setLlmHistory("");
+    void refreshLlmHistory(streamAgentId);
+  }, [connectAgentStream, refreshLlmHistory, streamAgentId]);
 
   useEffect(() => {
     if (!activeGroupId || !session) return;
@@ -949,7 +934,10 @@ function IMPageInner() {
               <button
                 key={g.id}
                 className={cx("row", g.id === activeGroupId && "active")}
-                onClick={() => setActiveGroupId(g.id)}
+                onClick={() => {
+                  setActiveGroupId(g.id);
+                  setSelectedToAgentId(null);
+                }}
               >
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
 	                  <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -1026,8 +1014,7 @@ function IMPageInner() {
           <button
             className="btn"
             onClick={() => {
-              setStreamBlocks([]);
-              setRawStreamLog("");
+              setLlmHistory("");
               setContentStream("");
               setReasoningStream("");
               setToolStream("");
@@ -1060,8 +1047,10 @@ function IMPageInner() {
           </div>
 
           <div className="card">
-            <div className="card-title">Raw stream</div>
-            <div className="card-body mono">{rawStreamLog || "—"}</div>
+            <div className="card-title">LLM history</div>
+            <div className="card-body mono" style={{ whiteSpace: "pre-wrap" }}>
+              {llmHistory || "—"}
+            </div>
           </div>
         </div>
       </section>

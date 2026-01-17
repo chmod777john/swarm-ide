@@ -20,20 +20,21 @@ IM界面：
 
 Agent-Graph 界面：展示 Agent 间的事件和数据流动
 
-Agent 详情区： 
+Agent 详情区：
 
-展示 agent 的 context 以流式的方式
+展示 agent 的 LLM 历史（`llm_history`），非流式；通过 UI 事件或 `agent.done` 触发刷新。
+`llm_history` 为单 Agent 全局记忆，与 IM group 无关。
 
 ## 用户操作路径（MVP）
 
 1) 首次进入/新建 workspace：系统自动创建人类 agent、初始助手 agent，并建立两者的 P2P 会话，落到默认对话。
-2) 进入页面加载列表：拉取对话列表（含每个会话的最近一条消息摘要与未读数），按时间排序显示。[并且建立监听后端的连接，当后端有类似发消息等等的事件发生时，触发拉取]   [另一条stream连接用于获取llm上下文]
+2) 进入页面加载列表：拉取对话列表（含每个会话的最近一条消息摘要与未读数），按时间排序显示。[并且建立监听后端的连接，当后端有类似发消息等等的事件发生时，触发拉取]   [LLM history 不用流式，收到 UI 事件或 `agent.done` 后按需拉取]
 3) 发送消息：人在当前会话输入文本，消息写入后触发助手唤醒。
-4) 助手响应：助手拉取未读 → 推理流式输出 → 前端通过刚刚已经建立的stream显示llmcontext -> 本次流式输出完成，触发前端那个连接，触发拉取。
+4) 助手响应：助手拉取未读 → 推理输出 → 完整输出写入 `llm_history`；前端通过 UI 事件触发后拉取 `llm_history` 展示。
    **注意**：推理产出不会自动写回当前会话；若要对人类或其他 agent 发送消息，必须显式调用 IM 工具（如 `send_group_message` / `send_direct_message`）。
 
 5) 拉取分为拉侧边栏和拉当前group
-6) llm 流式过程中，刷新页面，流式不变（也就是进入页面是总是连接那个 stream）
+6) 刷新页面时，直接拉取最新 `llm_history` 展示
 
 7) 用户让 assistant 创建 coder。创建事件触发监听拉取。此时拉取结果没有变化
 8) 用户点击搜索栏，会列出 agents 和所有 groups 。用户点击单个 agent ，会自动拉群（若没有则新建）
@@ -66,8 +67,8 @@ Agent 详情区：
 │ 主区：聊天 + 详情                                             │
 │ ┌───────────────────────────────┬───────────────────────────┐ │
 │ │ 聊天窗口（当前会话）          │ │ Agent 详情（可折叠/抽屉） │ │
-│ │ ┌─────────────────────────┐   │ │ 上下文流（SSE 实时追加） │ │
-│ │ │ 消息气泡区               │   │ │ 历史+chunk 流展示       │ │
+│ │ ┌─────────────────────────┐   │ │ LLM history（非流式）    │ │
+│ │ │ 消息气泡区               │   │ │ JSON 预格式化展示        │ │
 │ │ │ [时间分割线]             │   │ │                         │ │
 │ │ │ 人: 你好                 │   │ │                         │ │
 │ │ │ 助手: ... (流式中)       │   │ │                         │ │
@@ -97,32 +98,21 @@ Agent 详情区：
   返回群列表 + `unreadCount` + `lastMessage` + `updatedAt`，按时间排序。
 - **当前会话历史**：`GET /api/groups/:id/messages`  
   拉取全量消息用于恢复消息区。
-- **Agent 上下文流**：`GET /api/agents/:id/context-stream`（SSE）  
-  该 GET 为幂等拉取：每次连接都会从头重放所有历史 chunk，并继续推送实时 `agent.stream` / `agent.done`。
-  - **流来源约定**：仅使用 Upstash Realtime channel 回放与实时订阅（无本地 fallback）。
-  - **回放策略**：每次连接统一从 `history.start = "-"` 回放（不使用 `Last-Event-ID` 断点续传）。
-  - **事件范围**：不发送 `agent.history`；历史完全通过 `agent.stream` 的 chunk 回放重建。
-- **llm-context 流事件类型与结构**（SSE `data:` JSON）
-  - `agent.stream`：增量 chunk  
-    `{ event: "agent.stream", data: { kind: "content"|"reasoning"|"tool_calls"|"tool_result", delta: string, tool_call_id?: string, tool_call_name?: string } }`
-  - `agent.wakeup`：被唤醒  
-    `{ event: "agent.wakeup", data: { agentId: string, reason?: "manual"|"group_message"|"direct_message"|"context_stream"|string } }`
-  - `agent.unread`：拉取未读概览  
-    `{ event: "agent.unread", data: { agentId: string, batches: [{ groupId: string, messageIds: string[] }] } }`
-  - `agent.done`：本次推理结束  
-    `{ event: "agent.done", data: { finishReason?: "stop"|"tool_calls"|"continue"|string } }`
-  - `agent.error`：错误事件  
-    `{ event: "agent.error", data: { message: string } }`
-  - **流来源说明**：
-    - agent 发起 LLM call 后进入流式推理阶段，逐 chunk 写入 Realtime channel（或内存 bus）。
-    - 推理过程中不会立刻改写持久化 context（`llm_history`），避免“半成品”污染。
-- 流结束（`agent.done`）后，才将完整 assistant 输出追加到持久化 context；**不会自动写入 `messages`**。消息写入仅由显式 `send_*` 工具触发。
+- **Agent LLM history**：`GET /api/agents/:id`  
+  返回 `{ agentId, role, llmHistory }`；前端在 UI 事件或 `agent.done` 后按需拉取并展示。
+- 推理完成后将完整输出写入持久化 context（`llm_history`）；**不会自动写入 `messages`**。消息写入仅由显式 `send_*` 工具触发。
 - **UI 事件流（可选）**：`GET /api/ui-stream?workspaceId=...`（SSE）  
   仅订阅当前 workspace 的更新提示，不承载完整消息数据，也不要求可恢复。
-  触发场景（仅 send / create）：
+  触发场景：
   - 新消息写入（human/agent）：`ui.message.created`
   - 新群创建：`ui.group.created`
   - 新 agent 创建：`ui.agent.created`
+  - LLM 调用开始：`ui.agent.llm.start`
+  - LLM 调用结束：`ui.agent.llm.done`
+  - LLM 历史持久化：`ui.agent.history.persisted`
+  - Tool call 开始：`ui.agent.tool_call.start`
+  - Tool call 结束：`ui.agent.tool_call.done`
+  - 数据库写入完成：`ui.db.write`
   UI 事件到达后的前端动作：
   - 拉取侧边栏会话列表：`GET /api/groups?workspaceId=...&agentId=...`
   - 拉取当前打开的会话：`GET /api/groups/:id/messages`
@@ -140,7 +130,7 @@ Agent 详情区：
 - `POST /api/groups { workspaceId, memberIds, name? }` 仅用于“确认创建”场景。
 
 ### 5) SSE 断线重连
-- `context-stream` 为幂等 GET：断线后直接重新连接即可，服务端从头重放历史并继续实时推送。
+- `context-stream` 为幂等 GET：断线后直接重新连接即可，服务端继续推送实时事件。
 - `ui-stream` 仅通知实时事件，无需历史重放，断线后直接重连即可。
 
 ## IM 工具接口（Agent 可用）
