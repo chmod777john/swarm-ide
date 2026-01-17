@@ -4,10 +4,11 @@
 
 ## 环境变量
 - `DATABASE_URL`：PostgreSQL 连接串（例如 `postgres://user:pass@localhost:5432/agent_wechat`）
+- `REDIS_URL`：Redis 连接串（例如 `redis://localhost:6379`）
 - `GLM_API_KEY`：智谱 API Key（或使用 `ZHIPUAI_API_KEY` 作为兼容）
 - `GLM_BASE_URL`（可选）：默认 `https://open.bigmodel.cn/api/paas/v4/chat/completions`
 
-## 启动 PostgreSQL（Docker）
+## 启动 PostgreSQL + Redis（Docker）
 ```bash
 cd backend
 docker compose up -d

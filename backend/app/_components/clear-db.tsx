@@ -5,22 +5,21 @@ import { useState } from "react";
 const SESSION_KEY = "agent-wechat.session.v1";
 
 export default function ClearDbButton() {
-  const [busy, setBusy] = useState<"pg" | "rt" | null>(null);
+  const [busy, setBusy] = useState<"reset" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  async function onClearPostgres() {
+  async function onReset() {
     if (busy) return;
     setError(null);
 
     const ok = window.confirm(
-      "This will DELETE all workspaces, agents, groups, and messages in Postgres. Continue?"
+      "This will DELETE all data in Postgres and Redis, then re-init schema. Continue?"
     );
     if (!ok) return;
 
-    setBusy("pg");
+    setBusy("reset");
     try {
-      await fetch("/api/admin/clear-db", { method: "POST" });
-      await fetch("/api/admin/init-db", { method: "POST" });
+      await fetch("/api/admin/reset", { method: "POST" });
       try {
         localStorage.removeItem(SESSION_KEY);
       } catch {
@@ -34,32 +33,10 @@ export default function ClearDbButton() {
     }
   }
 
-  async function onClearRealtime() {
-    if (busy) return;
-    setError(null);
-
-    const ok = window.confirm(
-      "This will DELETE all agent/ui stream history in Upstash. Continue?"
-    );
-    if (!ok) return;
-
-    setBusy("rt");
-    try {
-      await fetch("/api/admin/clear-realtime", { method: "POST" });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(null);
-    }
-  }
-
   return (
     <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-      <button className="btn" onClick={() => void onClearPostgres()} disabled={busy !== null}>
-        {busy === "pg" ? "Clearing..." : "Clear Postgres"}
-      </button>
-      <button className="btn" onClick={() => void onClearRealtime()} disabled={busy !== null}>
-        {busy === "rt" ? "Clearing..." : "Clear Realtime"}
+      <button className="btn" onClick={() => void onReset()} disabled={busy !== null}>
+        {busy === "reset" ? "Resetting..." : "Reset DB + Redis"}
       </button>
       {error ? (
         <span className="muted" style={{ color: "#fecaca", fontSize: 13 }}>

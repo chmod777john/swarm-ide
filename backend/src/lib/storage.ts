@@ -27,6 +27,28 @@ function initialAgentHistory(input: { agentId: UUID; workspaceId: UUID; role: st
   return JSON.stringify([{ role: "system", content }]);
 }
 
+async function emitDbWrite(input: {
+  workspaceId: UUID;
+  table: string;
+  action: "insert" | "update" | "delete";
+  recordId?: UUID | null;
+}) {
+  try {
+    const { getWorkspaceUIBus } = await import("@/runtime/ui-bus");
+    getWorkspaceUIBus().emit(input.workspaceId, {
+      event: "ui.db.write",
+      data: {
+        workspaceId: input.workspaceId,
+        table: input.table,
+        action: input.action,
+        recordId: input.recordId ?? null,
+      },
+    });
+  } catch {
+    // best-effort only
+  }
+}
+
 export const store = {
   async findLatestExactP2PGroupId(input: {
     workspaceId: UUID;
@@ -208,6 +230,13 @@ export const store = {
       createdAt,
     });
 
+    await emitDbWrite({
+      workspaceId: input.workspaceId,
+      table: "agents",
+      action: "insert",
+      recordId: agentId,
+    });
+
     return { id: agentId, role: input.role, createdAt: createdAt.toISOString() };
   },
 
@@ -255,7 +284,11 @@ export const store = {
           workspaceId,
           role: "human",
           parentId: null,
-          llmHistory: "[]",
+          llmHistory: initialAgentHistory({
+            agentId: humanAgentId,
+            workspaceId,
+            role: "human",
+          }),
           createdAt,
         },
         {
@@ -295,6 +328,29 @@ export const store = {
       ]);
     });
 
+    await emitDbWrite({
+      workspaceId,
+      table: "workspaces",
+      action: "insert",
+      recordId: workspaceId,
+    });
+    await emitDbWrite({
+      workspaceId,
+      table: "agents",
+      action: "insert",
+    });
+    await emitDbWrite({
+      workspaceId,
+      table: "groups",
+      action: "insert",
+      recordId: defaultGroupId,
+    });
+    await emitDbWrite({
+      workspaceId,
+      table: "group_members",
+      action: "insert",
+    });
+
     return { workspaceId, humanAgentId, assistantAgentId, defaultGroupId };
   },
 
@@ -308,6 +364,10 @@ export const store = {
       .where(eq(workspaces.id, input.workspaceId))
       .limit(1);
     if (workspace.length === 0) throw new Error("workspace not found");
+
+    let createdHuman = false;
+    let createdAssistant = false;
+    let createdGroup = false;
 
     const result = await db.transaction(async (tx) => {
       const existingAgents = await tx
@@ -326,9 +386,14 @@ export const store = {
           workspaceId: input.workspaceId,
           role: "human",
           parentId: null,
-          llmHistory: "[]",
+          llmHistory: initialAgentHistory({
+            agentId: humanAgentId,
+            workspaceId: input.workspaceId,
+            role: "human",
+          }),
           createdAt,
         });
+        createdHuman = true;
       }
 
       if (!assistantAgentId) {
@@ -345,6 +410,7 @@ export const store = {
           }),
           createdAt,
         });
+        createdAssistant = true;
       }
 
       const candidate = await tx
@@ -384,10 +450,40 @@ export const store = {
             joinedAt: createdAt,
           },
         ]);
+        createdGroup = true;
       }
 
       return { workspaceId: input.workspaceId, humanAgentId, assistantAgentId, defaultGroupId };
     });
+
+    if (createdHuman) {
+      await emitDbWrite({
+        workspaceId: input.workspaceId,
+        table: "agents",
+        action: "insert",
+      });
+    }
+    if (createdAssistant) {
+      await emitDbWrite({
+        workspaceId: input.workspaceId,
+        table: "agents",
+        action: "insert",
+      });
+    }
+    if (createdGroup) {
+      await emitDbWrite({
+        workspaceId: input.workspaceId,
+        table: "groups",
+        action: "insert",
+        recordId: result.defaultGroupId,
+      });
+      await emitDbWrite({
+        workspaceId: input.workspaceId,
+        table: "group_members",
+        action: "insert",
+        recordId: result.defaultGroupId,
+      });
+    }
 
     return result;
   },
@@ -442,6 +538,25 @@ export const store = {
       ]);
     });
 
+    await emitDbWrite({
+      workspaceId: input.workspaceId,
+      table: "agents",
+      action: "insert",
+      recordId: agentId,
+    });
+    await emitDbWrite({
+      workspaceId: input.workspaceId,
+      table: "groups",
+      action: "insert",
+      recordId: groupId,
+    });
+    await emitDbWrite({
+      workspaceId: input.workspaceId,
+      table: "group_members",
+      action: "insert",
+      recordId: groupId,
+    });
+
     return { agentId, groupId, createdAt: createdAt.toISOString() };
   },
 
@@ -450,6 +565,13 @@ export const store = {
     const joinedAt = now();
 
     if (input.userIds.length === 0) return;
+
+    const group = await db
+      .select({ workspaceId: groups.workspaceId })
+      .from(groups)
+      .where(eq(groups.id, input.groupId))
+      .limit(1);
+    if (group.length === 0) throw new Error("group not found");
 
     await db
       .insert(groupMembers)
@@ -462,6 +584,13 @@ export const store = {
         }))
       )
       .onConflictDoNothing();
+
+    await emitDbWrite({
+      workspaceId: group[0]!.workspaceId,
+      table: "group_members",
+      action: "insert",
+      recordId: input.groupId,
+    });
   },
 
   async createGroup(input: { workspaceId: UUID; memberIds: UUID[]; name?: string }) {
@@ -485,6 +614,19 @@ export const store = {
           joinedAt: createdAt,
         }))
       );
+    });
+
+    await emitDbWrite({
+      workspaceId: input.workspaceId,
+      table: "groups",
+      action: "insert",
+      recordId: groupId,
+    });
+    await emitDbWrite({
+      workspaceId: input.workspaceId,
+      table: "group_members",
+      action: "insert",
+      recordId: groupId,
     });
 
     return { id: groupId, name: input.name ?? null, createdAt: createdAt.toISOString() };
@@ -558,6 +700,13 @@ export const store = {
       contentType: input.contentType,
       content: input.content,
       sendTime,
+    });
+
+    await emitDbWrite({
+      workspaceId: group[0]!.workspaceId,
+      table: "messages",
+      action: "insert",
+      recordId: messageId,
     });
 
     return { id: messageId, sendTime: sendTime.toISOString() };
@@ -657,6 +806,20 @@ export const store = {
       .where(
         dsql`${groupMembers.groupId} = ${input.groupId} and ${groupMembers.userId} = ${input.readerId}`
       );
+
+    const group = await db
+      .select({ workspaceId: groups.workspaceId })
+      .from(groups)
+      .where(eq(groups.id, input.groupId))
+      .limit(1);
+    if (group.length > 0) {
+      await emitDbWrite({
+        workspaceId: group[0]!.workspaceId,
+        table: "group_members",
+        action: "update",
+        recordId: input.groupId,
+      });
+    }
   },
 
   async markGroupReadToMessage(input: { groupId: UUID; readerId: UUID; messageId: UUID }) {
@@ -667,6 +830,20 @@ export const store = {
       .where(
         dsql`${groupMembers.groupId} = ${input.groupId} and ${groupMembers.userId} = ${input.readerId}`
       );
+
+    const group = await db
+      .select({ workspaceId: groups.workspaceId })
+      .from(groups)
+      .where(eq(groups.id, input.groupId))
+      .limit(1);
+    if (group.length > 0) {
+      await emitDbWrite({
+        workspaceId: group[0]!.workspaceId,
+        table: "group_members",
+        action: "update",
+        recordId: input.groupId,
+      });
+    }
   },
 
   async listGroupMemberIds(input: { groupId: UUID }): Promise<UUID[]> {
@@ -712,9 +889,27 @@ export const store = {
     return agent.role;
   },
 
-  async setAgentHistory(input: { agentId: UUID; llmHistory: string }) {
+  async setAgentHistory(input: { agentId: UUID; llmHistory: string; workspaceId?: UUID }) {
     const db = getDb();
     await db.update(agents).set({ llmHistory: input.llmHistory }).where(eq(agents.id, input.agentId));
+
+    const workspaceId =
+      input.workspaceId ??
+      (
+        await db
+          .select({ workspaceId: agents.workspaceId })
+          .from(agents)
+          .where(eq(agents.id, input.agentId))
+          .limit(1)
+      )[0]?.workspaceId;
+    if (workspaceId) {
+      await emitDbWrite({
+        workspaceId,
+        table: "agents",
+        action: "update",
+        recordId: input.agentId,
+      });
+    }
   },
 
   async listUnreadByGroup(input: { agentId: UUID }): Promise<

@@ -15,6 +15,14 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+  redis:
+    image: redis:7-alpine
+    container_name: agent-wechat-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - agent_wechat_redis:/data
 
 volumes:
   agent_wechat_pg:
+  agent_wechat_redis:

@@ -31,7 +31,17 @@ export async function GET(req: Request) {
 
       const channel = getUpstashRealtime().channel(`ui:${workspaceId}`);
       upstashUnsubscribe = await channel.subscribe({
-        events: ["ui.agent.created", "ui.group.created", "ui.message.created"],
+        events: [
+          "ui.agent.created",
+          "ui.group.created",
+          "ui.message.created",
+          "ui.agent.llm.start",
+          "ui.agent.llm.done",
+          "ui.agent.history.persisted",
+          "ui.agent.tool_call.start",
+          "ui.agent.tool_call.done",
+          "ui.db.write",
+        ],
         onData: (evt) => {
           const payload = {
             event: evt.event,

@@ -1,69 +1,163 @@
-import { Redis } from "@upstash/redis";
-import { Realtime } from "@upstash/realtime";
-import z from "zod/v4";
+import { createClient } from "redis";
 
-const schema = {
-  agent: {
-    stream: z.any(),
-    wakeup: z.any(),
-    unread: z.any(),
-    done: z.any(),
-    error: z.any(),
-  },
-  ui: {
-    agent: { created: z.any() },
-    group: { created: z.any() },
-    message: { created: z.any() },
-  },
-} as const;
+type RedisClient = ReturnType<typeof createClient>;
 
-type AgentWechatRealtimeOpts = {
-  redis: Redis;
-  schema: typeof schema;
-  history: { maxLength: number };
+type RealtimeSubscribeOptions = {
+  events: string[];
+  history?: { start?: string; end?: string; limit?: number };
+  onData: (evt: { id?: string; event: string; data: unknown }) => void;
 };
 
-type RealtimeClient = Realtime<AgentWechatRealtimeOpts>;
+type ChannelHandle = {
+  emit: (event: string, payload: unknown) => Promise<void>;
+  subscribe: (opts: RealtimeSubscribeOptions) => Promise<() => void>;
+};
 
-let cached: RealtimeClient | null = null;
-let cachedRedis: Redis | null = null;
+type RealtimeClient = {
+  channel: (name: string) => ChannelHandle;
+};
+
+type StreamReadGroupResponse = Array<[string, Array<[string, Array<string>]>]>;
+
+let cachedClient: RedisClient | null = null;
+
+function getRedisUrl() {
+  return process.env.REDIS_URL ?? "redis://127.0.0.1:6379";
+}
 
 export function isUpstashRealtimeConfigured() {
-  const url = process.env.KV_REST_API_URL ?? process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.KV_REST_API_TOKEN ?? process.env.UPSTASH_REDIS_REST_TOKEN;
-  return !!(url && token);
+  return !!getRedisUrl();
+}
+
+async function getRedisClient(): Promise<RedisClient> {
+  if (cachedClient) return cachedClient;
+  const client = createClient({ url: getRedisUrl() });
+  client.on("error", () => undefined);
+  await client.connect();
+  cachedClient = client;
+  return client;
+}
+
+async function createSubscriber(): Promise<RedisClient> {
+  const client = createClient({ url: getRedisUrl() });
+  client.on("error", () => undefined);
+  await client.connect();
+  return client;
+}
+
+function parseStreamEntries(
+  entries: Array<[string, Array<string>]> | undefined,
+  events: string[],
+  onData: (evt: { id?: string; event: string; data: unknown }) => void
+) {
+  if (!entries) return;
+  for (const [id, fields] of entries) {
+    const dataFieldIdx = fields.indexOf("data");
+    const eventFieldIdx = fields.indexOf("event");
+    if (dataFieldIdx === -1 || eventFieldIdx === -1) continue;
+    const event = fields[eventFieldIdx + 1] ?? "";
+    if (events.length > 0 && !events.includes(event)) continue;
+    const raw = fields[dataFieldIdx + 1];
+    let payload: unknown = raw;
+    try {
+      payload = raw ? JSON.parse(raw) : raw;
+    } catch {
+      // ignore non-json payloads
+    }
+    onData({ id, event, data: payload });
+  }
+}
+
+async function readGroup(
+  client: RedisClient,
+  streamKey: string,
+  group: string,
+  consumer: string,
+  events: string[],
+  onData: (evt: { id?: string; event: string; data: unknown }) => void
+) {
+  const res = (await client.sendCommand([
+    "XREADGROUP",
+    "GROUP",
+    group,
+    consumer,
+    "COUNT",
+    "2000",
+    "STREAMS",
+    streamKey,
+    ">",
+  ])) as StreamReadGroupResponse | null;
+
+  if (!res || res.length === 0) return;
+  const [, entries] = res[0] ?? [];
+  parseStreamEntries(entries, events, onData);
 }
 
 export function getUpstashRealtime(): RealtimeClient {
-  if (cached) return cached;
+  return {
+    channel(name: string): ChannelHandle {
+      const streamKey = name;
+      return {
+        async emit(event: string, payload: unknown) {
+          const client = await getRedisClient();
+          await client.sendCommand([
+            "XADD",
+            streamKey,
+            "*",
+            "event",
+            event,
+            "data",
+            JSON.stringify(payload ?? null),
+          ]);
+          await client.publish(streamKey, "1");
+        },
+        async subscribe(opts: RealtimeSubscribeOptions) {
+          const client = await getRedisClient();
+          const subscriber = await createSubscriber();
+          const group = `sse-${crypto.randomUUID()}`;
+          const consumer = `c-${crypto.randomUUID()}`;
+          const startId = opts.history?.start === "-" ? "0" : "$";
 
-  const url = process.env.KV_REST_API_URL ?? process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.KV_REST_API_TOKEN ?? process.env.UPSTASH_REDIS_REST_TOKEN;
+          try {
+            await client.sendCommand([
+              "XGROUP",
+              "CREATE",
+              streamKey,
+              group,
+              startId,
+              "MKSTREAM",
+            ]);
+          } catch {
+            // ignore if group already exists
+          }
 
-  if (!url || !token) {
-    throw new Error(
-      "Missing Upstash REST credentials (set KV_REST_API_URL + KV_REST_API_TOKEN)"
-    );
-  }
+          if (opts.history?.start === "-") {
+            await readGroup(client, streamKey, group, consumer, opts.events, opts.onData);
+          }
 
-  const redis = new Redis({ url, token });
-  cachedRedis = redis;
-  cached = new Realtime({ redis, schema, history: { maxLength: 2000 } });
-  return cached;
+          const handle = async () => {
+            await readGroup(client, streamKey, group, consumer, opts.events, opts.onData);
+          };
+
+          await subscriber.subscribe(streamKey, () => void handle());
+
+          return async () => {
+            try {
+              await subscriber.unsubscribe(streamKey);
+            } catch {
+              // ignore
+            }
+            await subscriber.quit().catch(() => undefined);
+            await client
+              .sendCommand(["XGROUP", "DESTROY", streamKey, group])
+              .catch(() => undefined);
+          };
+        },
+      };
+    },
+  };
 }
 
-export function getUpstashRedis(): Redis {
-  if (cachedRedis) return cachedRedis;
-
-  const url = process.env.KV_REST_API_URL ?? process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.KV_REST_API_TOKEN ?? process.env.UPSTASH_REDIS_REST_TOKEN;
-
-  if (!url || !token) {
-    throw new Error(
-      "Missing Upstash REST credentials (set KV_REST_API_URL + KV_REST_API_TOKEN)"
-    );
-  }
-
-  cachedRedis = new Redis({ url, token });
-  return cachedRedis;
+export async function getUpstashRedis(): Promise<RedisClient> {
+  return await getRedisClient();
 }

@@ -7,7 +7,7 @@ export async function POST() {
     return Response.json({ error: "Upstash not configured" }, { status: 400 });
   }
 
-  const redis = getUpstashRedis();
+  const redis = await getUpstashRedis();
 
   const keys = [
     ...(await redis.keys("agent:*")),

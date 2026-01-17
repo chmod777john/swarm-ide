@@ -4,7 +4,7 @@
 *   **Runtime**: Bun
 *   **Backend**: Next.js Route Handlers / API Routes
 *   **ORM**: Drizzle ORM (PostgreSQL)
-*   **Streaming**: Upstash Realtime (Redis Streams) + SSE
+*   **Streaming**: Redis Streams (local) + SSE
 *   **Background Jobs**: Upstash Workflow (或 Bun 后台任务)
 *   **Frontend**: Next.js + Tailwind + Framer Motion
 
@@ -28,7 +28,7 @@
     *   `workspace_id`: UUID → workspaces.id
     *   `role`: TEXT - Agent 角色 ('writer', 'reviewer', 'coder'...)
     *   `parent_id`: UUID → agents.id - 可选，用于追踪组织树
-    *   `llm_history`: TEXT - LLM 对话历史（JSON: [{role, content, tool_calls, ...}]）
+    *   `llm_history`: TEXT - 单 Agent 的全局 LLM 对话历史（JSON: [{role, content, tool_calls, ...}]），与 IM group 无关
     *   `created_at`: TIMESTAMP
 
 ### 3.3 IM 系统

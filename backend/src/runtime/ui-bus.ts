@@ -16,6 +16,60 @@ export type UIEvent =
       at: number;
       event: "ui.message.created";
       data: { workspaceId: string; groupId: string; message: { id: string; senderId: string; sendTime: string } };
+    }
+  | {
+      id: number;
+      at: number;
+      event: "ui.agent.llm.start";
+      data: { workspaceId: string; agentId: string; groupId: string; round: number };
+    }
+  | {
+      id: number;
+      at: number;
+      event: "ui.agent.llm.done";
+      data: {
+        workspaceId: string;
+        agentId: string;
+        groupId: string;
+        round: number;
+        finishReason?: string | null;
+      };
+    }
+  | {
+      id: number;
+      at: number;
+      event: "ui.agent.history.persisted";
+      data: { workspaceId: string; agentId: string; groupId: string; historyLength: number };
+    }
+  | {
+      id: number;
+      at: number;
+      event: "ui.agent.tool_call.start";
+      data: { workspaceId: string; agentId: string; groupId: string; toolCallId?: string; toolName?: string };
+    }
+  | {
+      id: number;
+      at: number;
+      event: "ui.agent.tool_call.done";
+      data: {
+        workspaceId: string;
+        agentId: string;
+        groupId: string;
+        toolCallId?: string;
+        toolName?: string;
+        ok: boolean;
+      };
+    }
+  | {
+      id: number;
+      at: number;
+      event: "ui.db.write";
+      data: {
+        workspaceId: string;
+        table: string;
+        action: "insert" | "update" | "delete";
+        recordId?: string | null;
+      };
     };
 
 type Listener = (evt: UIEvent) => void;
