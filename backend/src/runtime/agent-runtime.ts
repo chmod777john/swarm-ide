@@ -417,19 +417,18 @@ class AgentRunner {
         return { ok: false, error: "Missing role" };
       }
 
-      const created = await store.createAgent({
+      const created = await store.createSubAgentWithP2P({
         workspaceId,
+        creatorId: this.agentId,
         role,
-        parentId: this.agentId,
-        llmHistory: "[]",
       });
-      this.ensureRunner(created.id);
+      this.ensureRunner(created.agentId);
       getWorkspaceUIBus().emit(workspaceId, {
         event: "ui.agent.created",
-        data: { workspaceId, agent: { id: created.id, role, parentId: this.agentId } },
+        data: { workspaceId, agent: { id: created.agentId, role, parentId: this.agentId } },
       });
       emitToolDone(true);
-      return { ok: true, agentId: created.id, role };
+      return { ok: true, agentId: created.agentId, role, groupId: created.groupId };
     }
 
     if (name === "list_agents") {

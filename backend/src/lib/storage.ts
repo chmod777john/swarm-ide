@@ -494,6 +494,9 @@ export const store = {
     const agentId = uuid();
     const groupId = uuid();
 
+    const defaults = await store.ensureWorkspaceDefaults({ workspaceId: input.workspaceId });
+    const humanAgentId = defaults.humanAgentId;
+
     const workspace = await db
       .select({ id: workspaces.id })
       .from(workspaces)
@@ -525,7 +528,7 @@ export const store = {
       await tx.insert(groupMembers).values([
         {
           groupId,
-          userId: input.creatorId,
+          userId: humanAgentId,
           lastReadMessageId: null,
           joinedAt: createdAt,
         },

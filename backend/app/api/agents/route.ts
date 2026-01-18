@@ -48,24 +48,26 @@ export async function POST(req: Request) {
 
   const runtime = getAgentRuntime();
   await runtime.bootstrap();
+  const { humanAgentId } = await store.ensureWorkspaceDefaults({ workspaceId });
 
   if (body?.groupId) {
-    const created = await store.createAgent({
-      workspaceId,
-      role,
-      parentId: creatorId,
-      llmHistory: "[]",
-    });
-
-    await store.addGroupMembers({ groupId: body.groupId, userIds: [created.id] });
-    runtime.ensureRunner(created.id);
+    const created = await store.createSubAgentWithP2P({ workspaceId, creatorId, role });
+    await store.addGroupMembers({ groupId: body.groupId, userIds: [created.agentId] });
+    runtime.ensureRunner(created.agentId);
     getWorkspaceUIBus().emit(workspaceId, {
       event: "ui.agent.created",
-      data: { workspaceId, agent: { id: created.id, role, parentId: creatorId } },
+      data: { workspaceId, agent: { id: created.agentId, role, parentId: creatorId } },
+    });
+    getWorkspaceUIBus().emit(workspaceId, {
+      event: "ui.group.created",
+      data: {
+        workspaceId,
+        group: { id: created.groupId, name: role, memberIds: [humanAgentId, created.agentId] },
+      },
     });
 
     return Response.json(
-      { agentId: created.id, groupId: body.groupId, createdAt: created.createdAt },
+      { agentId: created.agentId, groupId: body.groupId, createdAt: created.createdAt },
       { status: 201 }
     );
   }
@@ -78,7 +80,7 @@ export async function POST(req: Request) {
   });
   getWorkspaceUIBus().emit(workspaceId, {
     event: "ui.group.created",
-    data: { workspaceId, group: { id: created.groupId, name: role, memberIds: [creatorId, created.agentId] } },
+    data: { workspaceId, group: { id: created.groupId, name: role, memberIds: [humanAgentId, created.agentId] } },
   });
 
   return Response.json(created, { status: 201 });

@@ -144,15 +144,6 @@ function IMPageInner() {
   const uiEsRef = useRef<EventSource | null>(null);
   const llmHistoryReqIdRef = useRef(0);
 
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [selectedToAgentId, setSelectedToAgentId] = useState<UUID | null>(null);
-  const [selectedGroupMemberIds, setSelectedGroupMemberIds] = useState<UUID[]>([]);
-  const [searchResults, setSearchResults] = useState<{ agents: AgentMeta[]; groups: Group[] }>({
-    agents: [],
-    groups: [],
-  });
-  const openingConversationRef = useRef<UUID | null>(null);
 
   const activeGroup = useMemo(
     () => groups.find((g) => g.id === activeGroupId) ?? null,
@@ -182,22 +173,6 @@ function IMPageInner() {
     },
     [agentRoleById, session?.defaultGroupId, session?.humanAgentId]
   );
-
-  const humanVisibleAgents = useMemo(() => {
-    if (!session) return [];
-    return agents.filter((a) => a.id !== session.humanAgentId);
-  }, [agents, session]);
-
-  const searchAgents = useMemo(() => {
-    if (!session) return [];
-    if (!searchOpen) return humanVisibleAgents;
-    return searchResults.agents.filter((a) => a.id !== session.humanAgentId);
-  }, [humanVisibleAgents, searchOpen, searchResults.agents, session]);
-
-  const searchGroups = useMemo(() => {
-    if (!searchOpen) return [];
-    return searchResults.groups;
-  }, [searchOpen, searchResults.groups]);
 
   const streamAgentId = useMemo(() => {
     if (!session) return null;
@@ -451,59 +426,6 @@ function IMPageInner() {
     }
   }, [connectAgentStream, refreshGroups, session]);
 
-  const toggleGroupMember = useCallback((id: UUID) => {
-    setSelectedGroupMemberIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
-  }, []);
-
-  const createGroupFromSelection = useCallback(async () => {
-    if (!session) return;
-    if (selectedGroupMemberIds.length === 0) return;
-
-    setError(null);
-    setAgentError(null);
-    setStatus("boot");
-
-    try {
-      const memberIds = Array.from(
-        new Set([session.humanAgentId, ...selectedGroupMemberIds].filter(Boolean))
-      );
-      if (memberIds.length < 2) {
-        setStatus("idle");
-        setError("Need at least 2 members");
-        return;
-      }
-
-      const nameRaw = window.prompt("Group name (optional)", "") ?? "";
-      const name = nameRaw.trim() || undefined;
-
-      const created = await api<{ id: string; name: string | null }>(`/api/groups`, {
-        method: "POST",
-        body: JSON.stringify({ workspaceId: session.workspaceId, memberIds, name }),
-      });
-
-      setSelectedGroupMemberIds([]);
-      setSelectedToAgentId(null);
-      setSearchQuery("");
-      setActiveGroupId(created.id);
-
-      const firstNonHuman =
-        memberIds.find((id) => id !== session.humanAgentId) ?? session.assistantAgentId;
-      connectAgentStream(firstNonHuman);
-      setStatus("idle");
-      void refreshGroups(session);
-      void refreshAgents(session);
-    } catch (e) {
-      setStatus("idle");
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, [
-    connectAgentStream,
-    refreshAgents,
-    refreshGroups,
-    selectedGroupMemberIds,
-    session,
-  ]);
-
   const onSend = useCallback(async () => {
     if (!session || !activeGroupId) return;
     const text = draft.trim();
@@ -557,52 +479,10 @@ function IMPageInner() {
     queueMicrotask(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }));
 
     try {
-      const targetId = selectedToAgentId;
-      const activeHasTarget =
-        !!targetId &&
-        !!activeGroup?.memberIds?.includes(targetId) &&
-        !!activeGroup?.memberIds?.includes(session.humanAgentId);
-
-      if (targetId && !activeHasTarget) {
-        const candidates = groups
-          .filter(
-            (g) =>
-              g.memberIds.includes(session.humanAgentId) &&
-              g.memberIds.includes(targetId) &&
-              g.memberIds.length === 2
-          )
-          .sort((x, y) => y.updatedAt.localeCompare(x.updatedAt));
-
-        const opened =
-          candidates[0] ??
-          (await api<{ id: string; name: string | null }>(`/api/groups`, {
-            method: "POST",
-            body: JSON.stringify({
-              workspaceId: session.workspaceId,
-              memberIds: [session.humanAgentId, targetId],
-              name: null,
-            }),
-          }));
-
-        await api(`/api/groups/${opened.id}/messages`, {
-          method: "POST",
-          body: JSON.stringify({ senderId: session.humanAgentId, content: text, contentType: "text" }),
-        });
-        setStatus("idle");
-        setSelectedToAgentId(null);
-        setSearchQuery("");
-        setActiveGroupId(opened.id);
-        connectAgentStream(targetId);
-        void refreshGroups(session);
-        return;
-      }
-
       await api(`/api/groups/${activeGroupId}/messages`, {
         method: "POST",
         body: JSON.stringify({ senderId: session.humanAgentId, content: text, contentType: "text" }),
       });
-      setSelectedToAgentId(null);
-      setSearchQuery("");
     } finally {
       // keep going
     }
@@ -611,15 +491,12 @@ function IMPageInner() {
     void refreshMessages(session, activeGroupId, { markRead: false });
     void refreshGroups(session);
   }, [
-    activeGroup,
     activeGroupId,
     connectAgentStream,
     draft,
     refreshAgents,
     refreshGroups,
     refreshMessages,
-    selectedToAgentId,
-    groups,
     session,
   ]);
 
@@ -638,27 +515,6 @@ function IMPageInner() {
     void refreshGroups(session).catch((e) => setError(e instanceof Error ? e.message : String(e)));
     void refreshAgents(session).catch((e) => setError(e instanceof Error ? e.message : String(e)));
   }, [refreshGroups, session]);
-
-  useEffect(() => {
-    if (!session || !searchOpen) return;
-    const q = searchQuery.trim();
-    void (async () => {
-      try {
-        const params = new URLSearchParams({
-          workspaceId: session.workspaceId,
-          agentId: session.humanAgentId,
-          q,
-        });
-        const res = await api<{ agents: AgentMeta[]; groups: Group[] }>(
-          `/api/search?${params.toString()}`
-        );
-        setSearchResults({ agents: res.agents, groups: res.groups });
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-        setSearchResults({ agents: [], groups: [] });
-      }
-    })();
-  }, [searchOpen, searchQuery, session]);
 
   useEffect(() => {
     if (!session) return;
@@ -744,183 +600,10 @@ function IMPageInner() {
         </div>
 
         <div style={{ padding: 12 }}>
-          <div style={{ position: "relative" }}>
-            <input
-              className="input"
-              placeholder="Search agents…"
-              value={searchQuery}
-              onChange={(e) => {
-                setSearchQuery(e.target.value);
-                setSearchOpen(true);
-              }}
-              onFocus={() => {
-                setSearchOpen(true);
-                if (session) void refreshAgents(session);
-              }}
-              onBlur={() => {
-                // allow click selection
-                window.setTimeout(() => {
-                  setSearchOpen(false);
-                  if (session && selectedGroupMemberIds.length > 1) {
-                    const confirmed = window.confirm("Create a new group with the selected agents?");
-                    if (confirmed) void createGroupFromSelection();
-                  }
-                }, 120);
-              }}
-            />
-            {searchOpen ? (
-              <div
-                className="card"
-                style={{
-                  position: "absolute",
-                  top: "calc(100% + 8px)",
-                  left: 0,
-                  right: 0,
-                  zIndex: 50,
-                  maxHeight: 320,
-                  overflow: "auto",
-                }}
-              >
-                <div className="card-title">Agents</div>
-                <div style={{ display: "flex", flexDirection: "column" }}>
-                  {searchAgents.length === 0 ? (
-                    <div className="muted" style={{ padding: 12 }}>
-                      No matches.
-                    </div>
-                  ) : (
-	                    searchAgents.slice(0, 50).map((a) => (
-	                      <button
-	                        key={a.id}
-	                        className={cx("row", selectedToAgentId === a.id && "active")}
-	                        onMouseDown={(e) => e.preventDefault()}
-	                        onClick={() => {
-	                          if (!session) return;
-	                          setSelectedToAgentId(a.id);
-	                          setSelectedGroupMemberIds((prev) =>
-	                            prev.includes(a.id) ? prev : [...prev, a.id]
-	                          );
-	                          setSearchOpen(false);
-
-	                          // If there is an existing conversation thread between human and this agent,
-	                          // switch to the most recently updated one. Otherwise, only "arm" the target:
-	                          // the first sent message will create a new conversation.
-	                          const candidates = groups
-	                            .filter(
-	                              (g) =>
-	                                g.memberIds.includes(session.humanAgentId) &&
-	                                g.memberIds.includes(a.id)
-	                            )
-	                            .sort((x, y) => y.updatedAt.localeCompare(x.updatedAt));
-
-	                          if (candidates[0]) {
-	                            setActiveGroupId(candidates[0].id);
-	                            connectAgentStream(a.id);
-	                            return;
-	                          }
-
-	                          if (openingConversationRef.current === a.id) return;
-	                          openingConversationRef.current = a.id;
-
-	                          void (async () => {
-	                            try {
-	                              const opened = await api<{ id: string; name: string | null }>(`/api/groups`, {
-	                                method: "POST",
-	                                body: JSON.stringify({
-	                                  workspaceId: session.workspaceId,
-	                                  memberIds: [session.humanAgentId, a.id],
-	                                  name: null,
-	                                }),
-	                              });
-
-	                              setActiveGroupId(opened.id);
-	                              connectAgentStream(a.id);
-	                              void refreshGroups(session);
-	                            } catch (e) {
-	                              setError(e instanceof Error ? e.message : String(e));
-	                            } finally {
-	                              openingConversationRef.current = null;
-	                            }
-	                          })();
-	                        }}
-	                      >
-                        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
-                            <input
-                              type="checkbox"
-                              checked={selectedGroupMemberIds.includes(a.id)}
-                              onMouseDown={(e) => e.preventDefault()}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                toggleGroupMember(a.id);
-                              }}
-                              readOnly
-                            />
-                            <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}>
-                              {a.role}
-                            </div>
-                          </div>
-                          <div className="muted mono" style={{ fontSize: 12 }}>
-                            {a.id.slice(0, 8)}
-                          </div>
-                        </div>
-                        <div className="muted mono" style={{ fontSize: 12, marginTop: 6 }}>
-                          {a.id}
-                        </div>
-	                      </button>
-                    ))
-                  )}
-                </div>
-
-                <div className="card-title" style={{ marginTop: 12 }}>
-                  Groups
-                </div>
-                <div style={{ display: "flex", flexDirection: "column" }}>
-                  {searchGroups.length === 0 ? (
-                    <div className="muted" style={{ padding: 12 }}>
-                      No matches.
-                    </div>
-                  ) : (
-                    searchGroups.slice(0, 50).map((g) => (
-                      <button
-                        key={g.id}
-                        className={cx("row", g.id === activeGroupId && "active")}
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => {
-                          if (!session) return;
-                          setActiveGroupId(g.id);
-                          const nextAgentId =
-                            g.memberIds.find((id) => id !== session.humanAgentId) ??
-                            session.assistantAgentId;
-                          connectAgentStream(nextAgentId);
-                          setSearchOpen(false);
-                        }}
-                      >
-                        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-                          <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}>
-                            {getGroupLabel(g)}
-                          </div>
-                          {g.unreadCount > 0 && <span className="badge">{g.unreadCount}</span>}
-                        </div>
-                        <div className="muted mono" style={{ fontSize: 12, marginTop: 6 }}>
-                          {g.id.slice(0, 8)}
-                        </div>
-                      </button>
-                    ))
-                  )}
-                </div>
-              </div>
-            ) : null}
-          </div>
-          <div className="muted mono" style={{ fontSize: 12, marginTop: 10, lineHeight: 1.4 }}>
+          <div className="muted mono" style={{ fontSize: 12, lineHeight: 1.4 }}>
             human: {session?.humanAgentId ?? "-"}
             <br />
             assistant: {session?.assistantAgentId ?? "-"}
-            {selectedToAgentId ? (
-              <>
-                <br />
-                to: {selectedToAgentId}
-              </>
-            ) : null}
           </div>
         </div>
 
@@ -936,7 +619,6 @@ function IMPageInner() {
                 className={cx("row", g.id === activeGroupId && "active")}
                 onClick={() => {
                   setActiveGroupId(g.id);
-                  setSelectedToAgentId(null);
                 }}
               >
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>

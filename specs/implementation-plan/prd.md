@@ -122,12 +122,9 @@ Agent 详情区：
   `body: { senderId, content, contentType }`
 - 成功后后端唤醒目标 agent；流式推理通过 SSE 下行。
 
-### 4) 搜索与建群
-- `GET /api/search?workspaceId=...&q=...` 返回 agents/humans。
-- 交互规则：
-  - 单选一个 agent：视为创建/打开该 agent 与 human 的 P2P 群；若已存在则复用，不新建。
-  - 多选多个 agent：当用户在选择控件失焦（unfocus）后，弹出确认框询问是否创建群；确认后再创建。
-- `POST /api/groups { workspaceId, memberIds, name? }` 仅用于“确认创建”场景。
+### 4) 创建 Agent（含 P2P 自动建立）
+- `POST /api/agents` 创建新 agent 后，**自动创建该 agent ↔ human 的 P2P 群**（与创建者无关）。
+- 如需加入现有群，可在创建时传 `groupId` 让新 agent 进入该群。
 
 ### 5) SSE 断线重连
 - `context-stream` 为幂等 GET：断线后直接重新连接即可，服务端继续推送实时事件。
