@@ -42,6 +42,29 @@ type Message = {
   sendTime: string;
 };
 
+type UiStreamEvent = {
+  id?: number;
+  at?: number;
+  event: string;
+  data: Record<string, any>;
+};
+
+type VizEvent = {
+  id: string;
+  kind: "agent" | "message" | "llm" | "tool" | "db";
+  label: string;
+  at: number;
+};
+
+type VizBeam = {
+  id: string;
+  fromId: UUID;
+  toId: UUID;
+  kind: "create" | "message";
+  label?: string;
+  createdAt: number;
+};
+
 type AgentStreamEvent =
   | {
       id: number;
@@ -134,6 +157,9 @@ function IMPageInner() {
   const [toolStream, setToolStream] = useState("");
   const [llmHistory, setLlmHistory] = useState("");
   const [agentError, setAgentError] = useState<string | null>(null);
+  const [vizEvents, setVizEvents] = useState<VizEvent[]>([]);
+  const [vizBeams, setVizBeams] = useState<VizBeam[]>([]);
+  const [vizSize, setVizSize] = useState({ width: 640, height: 260 });
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const esRef = useRef<EventSource | null>(null);
@@ -143,6 +169,9 @@ function IMPageInner() {
   const toolResultBuffersRef = useRef<Map<string, string>>(new Map());
   const uiEsRef = useRef<EventSource | null>(null);
   const llmHistoryReqIdRef = useRef(0);
+  const vizRef = useRef<HTMLDivElement | null>(null);
+  const groupsRef = useRef<Group[]>([]);
+  const beamTimeoutsRef = useRef<number[]>([]);
 
 
   const activeGroup = useMemo(
@@ -155,6 +184,33 @@ function IMPageInner() {
     for (const a of agents) map.set(a.id, a.role);
     return map;
   }, [agents]);
+
+  const vizLayout = useMemo(() => {
+    const width = Math.max(1, vizSize.width);
+    const height = Math.max(1, vizSize.height);
+    const center = { x: width / 2, y: height / 2 };
+    const radius = Math.max(60, Math.min(width, height) / 2 - 36);
+    const ordered = [...agents].sort(
+      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+    );
+    if (session) {
+      const humanIndex = ordered.findIndex((a) => a.id === session.humanAgentId);
+      if (humanIndex > -1) {
+        const [human] = ordered.splice(humanIndex, 1);
+        ordered.unshift(human);
+      }
+    }
+    const step = (Math.PI * 2) / Math.max(1, ordered.length);
+    const positions = new Map<string, { x: number; y: number }>();
+    ordered.forEach((agent, idx) => {
+      const angle = Math.PI / 2 + idx * step;
+      positions.set(agent.id, {
+        x: center.x + Math.cos(angle) * radius,
+        y: center.y + Math.sin(angle) * radius,
+      });
+    });
+    return { positions, ordered };
+  }, [agents, session, vizSize.height, vizSize.width]);
 
   const getGroupLabel = useCallback(
     (g: Group | null | undefined) => {
@@ -306,6 +362,25 @@ function IMPageInner() {
     },
     [refreshGroups]
   );
+
+  const pushVizEvent = useCallback(
+    (event: UiStreamEvent, label: string, kind: VizEvent["kind"]) => {
+      const at = typeof event.at === "number" ? event.at : Date.now();
+      const id = `${event.id ?? at}-${Math.random().toString(16).slice(2)}`;
+      setVizEvents((prev) => [...prev, { id, kind, label, at }].slice(-20));
+    },
+    []
+  );
+
+  const pushBeam = useCallback((beam: Omit<VizBeam, "id" | "createdAt">) => {
+    const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const createdAt = Date.now();
+    setVizBeams((prev) => [...prev, { ...beam, id, createdAt }].slice(-12));
+    const timeoutId = window.setTimeout(() => {
+      setVizBeams((prev) => prev.filter((b) => b.id !== id));
+    }, 2400);
+    beamTimeoutsRef.current.push(timeoutId);
+  }, []);
 
   const connectAgentStream = useCallback(
     (agentId: string) => {
@@ -511,6 +586,24 @@ function IMPageInner() {
   }, [activeGroupId]);
 
   useEffect(() => {
+    groupsRef.current = groups;
+  }, [groups]);
+
+  useEffect(() => {
+    const el = vizRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const rect = entry.contentRect;
+        if (!rect.width || !rect.height) continue;
+        setVizSize({ width: rect.width, height: rect.height });
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
     if (!session) return;
     void refreshGroups(session).catch((e) => setError(e instanceof Error ? e.message : String(e)));
     void refreshAgents(session).catch((e) => setError(e instanceof Error ? e.message : String(e)));
@@ -522,7 +615,59 @@ function IMPageInner() {
     const es = new EventSource(`/api/ui-stream?workspaceId=${encodeURIComponent(session.workspaceId)}`);
     uiEsRef.current = es;
 
-    es.onmessage = () => {
+    es.onmessage = (evt) => {
+      let payload: UiStreamEvent | null = null;
+      try {
+        payload = JSON.parse(evt.data) as UiStreamEvent;
+      } catch {
+        payload = null;
+      }
+      if (payload) {
+        if (payload.event === "ui.agent.created") {
+          const role = payload.data?.agent?.role ?? "agent";
+          const agentId = payload.data?.agent?.id as UUID | undefined;
+          const parentId = payload.data?.agent?.parentId as UUID | null | undefined;
+          pushVizEvent(payload, `创建 ${role}`, "agent");
+          if (agentId) {
+            const fromId = parentId || session.humanAgentId;
+            pushBeam({ fromId, toId: agentId, kind: "create", label: role });
+          }
+        } else if (payload.event === "ui.message.created") {
+          const senderId = payload.data?.message?.senderId as UUID | undefined;
+          const groupId = payload.data?.groupId as UUID | undefined;
+          const senderRole = senderId ? agentRoleById.get(senderId) ?? senderId.slice(0, 6) : "unknown";
+          pushVizEvent(payload, `消息: ${senderRole}`, "message");
+          if (senderId && groupId) {
+            const group = groupsRef.current.find((g) => g.id === groupId);
+            const targetId = group?.memberIds.find((id) => id !== senderId);
+            if (targetId) {
+              pushBeam({ fromId: senderId, toId: targetId, kind: "message" });
+            }
+          }
+        } else if (payload.event === "ui.agent.llm.start" || payload.event === "ui.agent.llm.done") {
+          const agentId = payload.data?.agentId as UUID | undefined;
+          const role = agentId ? agentRoleById.get(agentId) ?? agentId.slice(0, 6) : "agent";
+          const label = payload.event === "ui.agent.llm.start" ? `LLM 开始: ${role}` : `LLM 结束: ${role}`;
+          pushVizEvent(payload, label, "llm");
+        } else if (
+          payload.event === "ui.agent.tool_call.start" ||
+          payload.event === "ui.agent.tool_call.done"
+        ) {
+          const agentId = payload.data?.agentId as UUID | undefined;
+          const toolName = payload.data?.toolName ?? "tool";
+          const role = agentId ? agentRoleById.get(agentId) ?? agentId.slice(0, 6) : "agent";
+          const label =
+            payload.event === "ui.agent.tool_call.start"
+              ? `工具开始: ${role} · ${toolName}`
+              : `工具结束: ${role} · ${toolName}`;
+          pushVizEvent(payload, label, "tool");
+        } else if (payload.event === "ui.db.write") {
+          const table = payload.data?.table ?? "db";
+          const action = payload.data?.action ?? "write";
+          pushVizEvent(payload, `DB ${action}: ${table}`, "db");
+        }
+      }
+
       // any change in workspace => refresh lists (cheap enough for MVP)
       void refreshGroups(session);
       void refreshAgents(session);
@@ -536,7 +681,16 @@ function IMPageInner() {
     };
 
     return () => es.close();
-  }, [refreshAgents, refreshGroups, refreshLlmHistory, session, streamAgentId]);
+  }, [
+    agentRoleById,
+    pushBeam,
+    pushVizEvent,
+    refreshAgents,
+    refreshGroups,
+    refreshLlmHistory,
+    session,
+    streamAgentId,
+  ]);
 
   useEffect(() => {
     if (!streamAgentId) return;
@@ -555,6 +709,22 @@ function IMPageInner() {
   useEffect(() => {
     return () => esRef.current?.close();
   }, []);
+
+  useEffect(() => {
+    return () => {
+      beamTimeoutsRef.current.forEach((id) => window.clearTimeout(id));
+      beamTimeoutsRef.current = [];
+    };
+  }, []);
+
+  const roleColor = (role?: string) => {
+    if (!role) return "#e4e4e7";
+    if (role === "human") return "#f8fafc";
+    if (role === "assistant") return "#38bdf8";
+    if (role === "productmanager") return "#fb7185";
+    if (role === "coder") return "#34d399";
+    return "#fbbf24";
+  };
 
   const title = getGroupLabel(activeGroup);
 
@@ -644,29 +814,132 @@ function IMPageInner() {
           </div>
         </div>
 
-        <div className="chat">
-          {messages.map((m) => {
-            const isMe = m.senderId === session?.humanAgentId;
-            return (
-              <div
-                key={m.id}
-                style={{
-                  display: "flex",
-                  justifyContent: isMe ? "flex-end" : "flex-start",
-                  marginBottom: 10,
-                }}
-              >
-                <div className={cx("bubble", isMe ? "me" : "other")}>
-                  <div className="bubble-meta">
-                    {fmtTime(m.sendTime)} • {isMe ? "You" : m.senderId.slice(0, 8)}
+        <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+          <div className="chat" style={{ flex: "1 1 50%" }}>
+            {messages.map((m) => {
+              const isMe = m.senderId === session?.humanAgentId;
+              return (
+                <div
+                  key={m.id}
+                  style={{
+                    display: "flex",
+                    justifyContent: isMe ? "flex-end" : "flex-start",
+                    marginBottom: 10,
+                  }}
+                >
+                  <div className={cx("bubble", isMe ? "me" : "other")}>
+                    <div className="bubble-meta">
+                      {fmtTime(m.sendTime)} • {isMe ? "You" : m.senderId.slice(0, 8)}
+                    </div>
+                    <div>{m.content}</div>
                   </div>
-                  <div>{m.content}</div>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })}
 
-          <div ref={bottomRef} />
+            <div ref={bottomRef} />
+          </div>
+
+          <div
+            ref={vizRef}
+            style={{
+              position: "relative",
+              flex: "1 1 50%",
+              minHeight: 200,
+              borderTop: "1px solid #27272a",
+              background:
+                "radial-gradient(circle at 20% 20%, rgba(56,189,248,0.08), transparent 40%), radial-gradient(circle at 80% 70%, rgba(34,197,94,0.08), transparent 45%), #050505",
+            }}
+          >
+            <svg
+              width={vizSize.width}
+              height={vizSize.height}
+              style={{ position: "absolute", inset: 0 }}
+            >
+              {vizBeams.map((beam) => {
+                const from = vizLayout.positions.get(beam.fromId);
+                const to = vizLayout.positions.get(beam.toId);
+                if (!from || !to) return null;
+                const color = beam.kind === "create" ? "#60a5fa" : "#fbbf24";
+                return (
+                  <g key={beam.id} stroke={color} fill="none" opacity={0.8}>
+                    <line
+                      x1={from.x}
+                      y1={from.y}
+                      x2={to.x}
+                      y2={to.y}
+                      strokeWidth={beam.kind === "create" ? 2 : 1.5}
+                      strokeDasharray={beam.kind === "create" ? "6 4" : "0"}
+                    />
+                    <circle cx={to.x} cy={to.y} r={beam.kind === "create" ? 5 : 4} fill={color} />
+                  </g>
+                );
+              })}
+            </svg>
+
+            {vizLayout.ordered.map((agent) => {
+              const pos = vizLayout.positions.get(agent.id);
+              if (!pos) return null;
+              const color = roleColor(agent.role);
+              return (
+                <div
+                  key={agent.id}
+                  style={{
+                    position: "absolute",
+                    left: pos.x,
+                    top: pos.y,
+                    transform: "translate(-50%, -50%)",
+                    padding: "8px 10px",
+                    borderRadius: 999,
+                    border: `1px solid ${color}`,
+                    background: "rgba(8,8,8,0.8)",
+                    color,
+                    fontSize: 12,
+                    fontWeight: 600,
+                    letterSpacing: 0.2,
+                    boxShadow: "0 0 12px rgba(0,0,0,0.6)",
+                  }}
+                  title={agent.id}
+                >
+                  {agent.role}
+                </div>
+              );
+            })}
+
+            <div
+              style={{
+                position: "absolute",
+                right: 12,
+                bottom: 12,
+                width: 260,
+                maxHeight: "60%",
+                overflow: "auto",
+                border: "1px solid #27272a",
+                borderRadius: 12,
+                background: "rgba(9,9,11,0.85)",
+                padding: 10,
+                fontSize: 12,
+                color: "#e4e4e7",
+              }}
+            >
+              <div style={{ fontWeight: 700, marginBottom: 6 }}>事件流</div>
+              {vizEvents.length === 0 ? (
+                <div className="muted">暂无事件</div>
+              ) : (
+                vizEvents
+                  .slice(-6)
+                  .reverse()
+                  .map((evt) => (
+                    <div key={evt.id} style={{ marginBottom: 6 }}>
+                      <div style={{ fontWeight: 600 }}>{evt.label}</div>
+                      <div className="muted mono" style={{ fontSize: 11 }}>
+                        {new Date(evt.at).toLocaleTimeString()}
+                      </div>
+                    </div>
+                  ))
+              )}
+            </div>
+          </div>
         </div>
 
         {error ? <div className="toast">{error}</div> : null}
