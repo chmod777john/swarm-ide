@@ -11,6 +11,8 @@
   },
   "dependencies": {
     "drizzle-orm": "^0.45.1",
+    "framer-motion": "^11.2.10",
+    "lucide-react": "^0.469.0",
     "next": "^15.1.0",
     "postgres": "^3.4.8",
     "redis": "^4.7.0",

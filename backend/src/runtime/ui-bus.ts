@@ -15,7 +15,12 @@ export type UIEvent =
       id: number;
       at: number;
       event: "ui.message.created";
-      data: { workspaceId: string; groupId: string; message: { id: string; senderId: string; sendTime: string } };
+      data: {
+        workspaceId: string;
+        groupId: string;
+        memberIds?: string[];
+        message: { id: string; senderId: string; sendTime: string };
+      };
     }
   | {
       id: number;

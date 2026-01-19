@@ -2,6 +2,8 @@
 
 import { useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import { Briefcase, Code2, Network, User } from "lucide-react";
 
 type UUID = string;
 
@@ -18,6 +20,8 @@ type AgentMeta = {
   parentId: UUID | null;
   createdAt: string;
 };
+
+type AgentStatus = "IDLE" | "BUSY" | "WAKING";
 
 type Group = {
   id: UUID;
@@ -63,6 +67,13 @@ type VizBeam = {
   kind: "create" | "message";
   label?: string;
   createdAt: number;
+};
+
+type VizDebugEntry = {
+  id: string;
+  at: number;
+  type: "message_event" | "beam_created" | "beam_skipped";
+  data: Record<string, unknown>;
 };
 
 type AgentStreamEvent =
@@ -160,6 +171,11 @@ function IMPageInner() {
   const [vizEvents, setVizEvents] = useState<VizEvent[]>([]);
   const [vizBeams, setVizBeams] = useState<VizBeam[]>([]);
   const [vizSize, setVizSize] = useState({ width: 640, height: 260 });
+  const [vizScale, setVizScale] = useState(0.9);
+  const [vizOffset, setVizOffset] = useState({ x: 0, y: 0 });
+  const [vizIsPanning, setVizIsPanning] = useState(false);
+  const [agentStatusById, setAgentStatusById] = useState<Record<string, AgentStatus>>({});
+  const [vizDebug, setVizDebug] = useState<VizDebugEntry[]>([]);
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const esRef = useRef<EventSource | null>(null);
@@ -172,6 +188,7 @@ function IMPageInner() {
   const vizRef = useRef<HTMLDivElement | null>(null);
   const groupsRef = useRef<Group[]>([]);
   const beamTimeoutsRef = useRef<number[]>([]);
+  const vizPanStartRef = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
 
 
   const activeGroup = useMemo(
@@ -380,6 +397,21 @@ function IMPageInner() {
       setVizBeams((prev) => prev.filter((b) => b.id !== id));
     }, 2400);
     beamTimeoutsRef.current.push(timeoutId);
+  }, []);
+
+  const logVizDebug = useCallback((entry: Omit<VizDebugEntry, "id" | "at">) => {
+    const record: VizDebugEntry = {
+      ...entry,
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      at: Date.now(),
+    };
+    setVizDebug((prev) => [...prev, record].slice(-200));
+    if (typeof window !== "undefined") {
+      (window as any).__imVizDebug = (window as any).__imVizDebug ?? [];
+      (window as any).__imVizDebug.push(record);
+      // eslint-disable-next-line no-console
+      console.debug("[im-viz]", record);
+    }
   }, []);
 
   const connectAgentStream = useCallback(
@@ -604,6 +636,19 @@ function IMPageInner() {
   }, []);
 
   useEffect(() => {
+    const el = vizRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      const delta = e.deltaY > 0 ? -0.05 : 0.05;
+      setVizScale((s) => Math.min(Math.max(s + delta, 0.5), 2));
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
+  useEffect(() => {
     if (!session) return;
     void refreshGroups(session).catch((e) => setError(e instanceof Error ? e.message : String(e)));
     void refreshAgents(session).catch((e) => setError(e instanceof Error ? e.message : String(e)));
@@ -632,16 +677,44 @@ function IMPageInner() {
             const fromId = parentId || session.humanAgentId;
             pushBeam({ fromId, toId: agentId, kind: "create", label: role });
           }
+          if (agentId) {
+            setAgentStatusById((prev) => ({ ...prev, [agentId]: "IDLE" }));
+          }
         } else if (payload.event === "ui.message.created") {
           const senderId = payload.data?.message?.senderId as UUID | undefined;
           const groupId = payload.data?.groupId as UUID | undefined;
           const senderRole = senderId ? agentRoleById.get(senderId) ?? senderId.slice(0, 6) : "unknown";
           pushVizEvent(payload, `消息: ${senderRole}`, "message");
+          logVizDebug({
+            type: "message_event",
+            data: {
+              messageId: payload.data?.message?.id,
+              groupId,
+              senderId,
+              senderRole,
+              hasGroup: !!groupsRef.current.find((g) => g.id === groupId),
+            },
+          });
           if (senderId && groupId) {
-            const group = groupsRef.current.find((g) => g.id === groupId);
-            const targetId = group?.memberIds.find((id) => id !== senderId);
-            if (targetId) {
-              pushBeam({ fromId: senderId, toId: targetId, kind: "message" });
+            const payloadMembers = Array.isArray(payload.data?.memberIds) ? payload.data.memberIds : null;
+            const groupMembers =
+              payloadMembers ??
+              groupsRef.current.find((g) => g.id === groupId)?.memberIds ??
+              [];
+            const targetIds = groupMembers.filter((id: UUID) => id !== senderId);
+            if (targetIds.length === 0) {
+              logVizDebug({
+                type: "beam_skipped",
+                data: { reason: "no_targets", groupId, senderId },
+              });
+            } else {
+              targetIds.forEach((targetId) => {
+                pushBeam({ fromId: senderId, toId: targetId, kind: "message" });
+                logVizDebug({
+                  type: "beam_created",
+                  data: { groupId, senderId, targetId },
+                });
+              });
             }
           }
         } else if (payload.event === "ui.agent.llm.start" || payload.event === "ui.agent.llm.done") {
@@ -649,6 +722,12 @@ function IMPageInner() {
           const role = agentId ? agentRoleById.get(agentId) ?? agentId.slice(0, 6) : "agent";
           const label = payload.event === "ui.agent.llm.start" ? `LLM 开始: ${role}` : `LLM 结束: ${role}`;
           pushVizEvent(payload, label, "llm");
+          if (agentId) {
+            setAgentStatusById((prev) => ({
+              ...prev,
+              [agentId]: payload.event === "ui.agent.llm.start" ? "BUSY" : "IDLE",
+            }));
+          }
         } else if (
           payload.event === "ui.agent.tool_call.start" ||
           payload.event === "ui.agent.tool_call.done"
@@ -661,6 +740,12 @@ function IMPageInner() {
               ? `工具开始: ${role} · ${toolName}`
               : `工具结束: ${role} · ${toolName}`;
           pushVizEvent(payload, label, "tool");
+          if (agentId) {
+            setAgentStatusById((prev) => ({
+              ...prev,
+              [agentId]: payload.event === "ui.agent.tool_call.start" ? "BUSY" : "IDLE",
+            }));
+          }
         } else if (payload.event === "ui.db.write") {
           const table = payload.data?.table ?? "db";
           const action = payload.data?.action ?? "write";
@@ -683,6 +768,7 @@ function IMPageInner() {
     return () => es.close();
   }, [
     agentRoleById,
+    logVizDebug,
     pushBeam,
     pushVizEvent,
     refreshAgents,
@@ -724,6 +810,12 @@ function IMPageInner() {
     if (role === "productmanager") return "#fb7185";
     if (role === "coder") return "#34d399";
     return "#fbbf24";
+  };
+
+  const statusColor = (status?: AgentStatus) => {
+    if (status === "BUSY") return "#ef4444";
+    if (status === "WAKING") return "#facc15";
+    return "#22c55e";
   };
 
   const title = getGroupLabel(activeGroup);
@@ -848,81 +940,279 @@ function IMPageInner() {
               minHeight: 200,
               borderTop: "1px solid #27272a",
               background:
-                "radial-gradient(circle at 20% 20%, rgba(56,189,248,0.08), transparent 40%), radial-gradient(circle at 80% 70%, rgba(34,197,94,0.08), transparent 45%), #050505",
+                "radial-gradient(circle at 20% 20%, rgba(56,189,248,0.12), transparent 40%), radial-gradient(circle at 80% 70%, rgba(34,197,94,0.12), transparent 45%), linear-gradient(transparent 23px, rgba(39,39,42,0.35) 24px), linear-gradient(90deg, transparent 23px, rgba(39,39,42,0.35) 24px), #050505",
+              backgroundSize: "24px 24px, 24px 24px, 24px 24px, 24px 24px, auto",
+              cursor: vizIsPanning ? "grabbing" : "grab",
+              overflow: "hidden",
+            }}
+            onMouseDown={(e) => {
+              if (e.button !== 0) return;
+              setVizIsPanning(true);
+              vizPanStartRef.current = { x: e.clientX, y: e.clientY, ox: vizOffset.x, oy: vizOffset.y };
+            }}
+            onMouseMove={(e) => {
+              if (!vizIsPanning || !vizPanStartRef.current) return;
+              const dx = e.clientX - vizPanStartRef.current.x;
+              const dy = e.clientY - vizPanStartRef.current.y;
+              setVizOffset({ x: vizPanStartRef.current.ox + dx, y: vizPanStartRef.current.oy + dy });
+            }}
+            onMouseUp={() => {
+              setVizIsPanning(false);
+              vizPanStartRef.current = null;
+            }}
+            onMouseLeave={() => {
+              setVizIsPanning(false);
+              vizPanStartRef.current = null;
             }}
           >
-            <svg
-              width={vizSize.width}
-              height={vizSize.height}
-              style={{ position: "absolute", inset: 0 }}
-            >
-              {vizBeams.map((beam) => {
-                const from = vizLayout.positions.get(beam.fromId);
-                const to = vizLayout.positions.get(beam.toId);
-                if (!from || !to) return null;
-                const color = beam.kind === "create" ? "#60a5fa" : "#fbbf24";
-                return (
-                  <g key={beam.id} stroke={color} fill="none" opacity={0.8}>
-                    <line
-                      x1={from.x}
-                      y1={from.y}
-                      x2={to.x}
-                      y2={to.y}
-                      strokeWidth={beam.kind === "create" ? 2 : 1.5}
-                      strokeDasharray={beam.kind === "create" ? "6 4" : "0"}
-                    />
-                    <circle cx={to.x} cy={to.y} r={beam.kind === "create" ? 5 : 4} fill={color} />
-                  </g>
-                );
-              })}
-            </svg>
-
-            {vizLayout.ordered.map((agent) => {
-              const pos = vizLayout.positions.get(agent.id);
-              if (!pos) return null;
-              const color = roleColor(agent.role);
-              return (
-                <div
-                  key={agent.id}
-                  style={{
-                    position: "absolute",
-                    left: pos.x,
-                    top: pos.y,
-                    transform: "translate(-50%, -50%)",
-                    padding: "8px 10px",
-                    borderRadius: 999,
-                    border: `1px solid ${color}`,
-                    background: "rgba(8,8,8,0.8)",
-                    color,
-                    fontSize: 12,
-                    fontWeight: 600,
-                    letterSpacing: 0.2,
-                    boxShadow: "0 0 12px rgba(0,0,0,0.6)",
-                  }}
-                  title={agent.id}
-                >
-                  {agent.role}
-                </div>
-              );
-            })}
-
             <div
               style={{
                 position: "absolute",
-                right: 12,
-                bottom: 12,
-                width: 260,
-                maxHeight: "60%",
-                overflow: "auto",
+                left: 12,
+                top: 12,
+                display: "flex",
+                gap: 8,
+                alignItems: "center",
+                padding: "6px 10px",
+                borderRadius: 999,
                 border: "1px solid #27272a",
-                borderRadius: 12,
-                background: "rgba(9,9,11,0.85)",
-                padding: 10,
+                background: "rgba(9,9,11,0.7)",
                 fontSize: 12,
                 color: "#e4e4e7",
               }}
             >
-              <div style={{ fontWeight: 700, marginBottom: 6 }}>事件流</div>
+              <span className="mono">缩放 {Math.round(vizScale * 100)}%</span>
+              <button
+                className="btn"
+                style={{ padding: "2px 8px", fontSize: 12 }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setVizScale((s) => Math.min(s + 0.1, 2));
+                }}
+              >
+                +
+              </button>
+              <button
+                className="btn"
+                style={{ padding: "2px 8px", fontSize: 12 }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setVizScale((s) => Math.max(s - 0.1, 0.5));
+                }}
+              >
+                -
+              </button>
+              <button
+                className="btn"
+                style={{ padding: "2px 8px", fontSize: 12 }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setVizScale(0.9);
+                  setVizOffset({ x: 0, y: 0 });
+                }}
+              >
+                Reset
+              </button>
+              <span className="muted mono">Ctrl/⌘ + 滚轮缩放</span>
+            </div>
+
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                transform: `translate(${vizOffset.x}px, ${vizOffset.y}px) scale(${vizScale})`,
+                transformOrigin: "center center",
+                transition: vizIsPanning ? "none" : "transform 120ms ease-out",
+              }}
+            >
+              <svg
+                width={vizSize.width}
+                height={vizSize.height}
+                style={{ position: "absolute", inset: 0 }}
+              >
+                <AnimatePresence>
+                  {vizBeams.map((beam) => {
+                    const from = vizLayout.positions.get(beam.fromId);
+                    const to = vizLayout.positions.get(beam.toId);
+                    if (!from || !to) return null;
+                    const color = beam.kind === "create" ? "#3b82f6" : "#ffffff";
+                    return (
+                      <motion.g
+                        key={beam.id}
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 0.9 }}
+                        exit={{ opacity: 0 }}
+                        transition={{ duration: 0.6 }}
+                      >
+                        <motion.line
+                          x1={from.x}
+                          y1={from.y}
+                          x2={to.x}
+                          y2={to.y}
+                          stroke={color}
+                          strokeWidth={beam.kind === "create" ? 2.5 : 1.6}
+                          strokeDasharray={beam.kind === "create" ? "8 6" : "0"}
+                          initial={{ pathLength: 0, opacity: 0 }}
+                          animate={{ pathLength: 1, opacity: beam.kind === "create" ? 0.5 : 0.35 }}
+                          transition={{ duration: 0.5 }}
+                        />
+                        <motion.circle
+                          r={beam.kind === "create" ? 7 : 4}
+                          fill={color}
+                          initial={{ cx: from.x, cy: from.y }}
+                          animate={{ cx: to.x, cy: to.y }}
+                          transition={{ duration: 0.8, ease: "easeInOut" }}
+                          style={{ filter: `drop-shadow(0 0 ${beam.kind === "create" ? "12px" : "5px"} ${color})` }}
+                        />
+                        {beam.label ? (
+                          <foreignObject
+                            x={(from.x + to.x) / 2 - 80}
+                            y={(from.y + to.y) / 2 - 40}
+                            width={160}
+                            height={40}
+                          >
+                            <div
+                              style={{
+                                fontSize: 11,
+                                fontWeight: 700,
+                                color: beam.kind === "create" ? "#bfdbfe" : "#e4e4e7",
+                                border: `1px solid ${beam.kind === "create" ? "rgba(59,130,246,0.5)" : "rgba(82,82,91,0.5)"}`,
+                                background:
+                                  beam.kind === "create"
+                                    ? "rgba(30,58,138,0.6)"
+                                    : "rgba(9,9,11,0.7)",
+                                borderRadius: 999,
+                                padding: "4px 8px",
+                                textAlign: "center",
+                              }}
+                            >
+                              {beam.kind === "create" ? `create_agent(${beam.label})` : "send_message"}
+                            </div>
+                          </foreignObject>
+                        ) : null}
+                      </motion.g>
+                    );
+                  })}
+                </AnimatePresence>
+              </svg>
+
+              {vizLayout.ordered.map((agent) => {
+                const pos = vizLayout.positions.get(agent.id);
+                if (!pos) return null;
+                const status = agentStatusById[agent.id] ?? "IDLE";
+                const ring = statusColor(status);
+                const isHuman = agent.role === "human";
+                const Icon =
+                  agent.role === "productmanager"
+                    ? Briefcase
+                    : agent.role === "coder"
+                      ? Code2
+                      : agent.role === "assistant"
+                        ? Network
+                        : User;
+                return (
+                  <motion.div
+                    key={agent.id}
+                    initial={{ scale: 0, opacity: 0, x: pos.x, y: pos.y }}
+                    animate={{ scale: 1, opacity: 1, x: pos.x, y: pos.y }}
+                    transition={{ type: "spring", stiffness: 220, damping: 18 }}
+                    style={{
+                      position: "absolute",
+                      left: 0,
+                      top: 0,
+                      width: 90,
+                      height: 90,
+                      marginLeft: -45,
+                      marginTop: -45,
+                      cursor: "pointer",
+                    }}
+                    title={agent.id}
+                  >
+                    <div
+                      style={{
+                        width: 90,
+                        height: 90,
+                        borderRadius: "50%",
+                        border: `2px solid ${ring}`,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        background: "rgba(5,5,5,0.9)",
+                        boxShadow: `0 0 30px ${ring}55`,
+                        position: "relative",
+                      }}
+                    >
+                      <div
+                        style={{
+                          width: 70,
+                          height: 70,
+                          borderRadius: "50%",
+                          border: `2px solid ${isHuman ? "#f8fafc" : "#4ade80"}`,
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          background: "rgba(0,0,0,0.6)",
+                        }}
+                      >
+                        <Icon size={24} color={isHuman ? "#f8fafc" : "#e4e4e7"} />
+                      </div>
+                      {status === "BUSY" ? (
+                        <motion.div
+                          style={{
+                            position: "absolute",
+                            inset: 6,
+                            borderRadius: "50%",
+                            border: "2px solid #ef4444",
+                            borderTopColor: "transparent",
+                            borderRightColor: "transparent",
+                          }}
+                          animate={{ rotate: 360 }}
+                          transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+                        />
+                      ) : null}
+                    </div>
+                    <div
+                      style={{
+                        position: "absolute",
+                        top: 94,
+                        left: "50%",
+                        transform: "translateX(-50%)",
+                        textAlign: "center",
+                        width: 120,
+                        fontSize: 11,
+                        fontWeight: 700,
+                        color: "#e4e4e7",
+                      }}
+                    >
+                      {agent.role}
+                      <div style={{ fontSize: 9, color: ring, marginTop: 2 }}>{status}</div>
+                    </div>
+                  </motion.div>
+                );
+              })}
+            </div>
+
+            <div
+              style={{
+                position: "absolute",
+                right: 16,
+                top: 16,
+                width: 280,
+                maxHeight: "70%",
+                overflow: "auto",
+                border: "1px solid #27272a",
+                borderRadius: 12,
+                background: "rgba(9,9,11,0.82)",
+                padding: 12,
+                fontSize: 12,
+                color: "#e4e4e7",
+                boxShadow: "0 20px 30px rgba(0,0,0,0.45)",
+              }}
+            >
+              <div style={{ fontWeight: 700, marginBottom: 8, display: "flex", justifyContent: "space-between" }}>
+                <span>事件流</span>
+                <span className="muted mono">{vizEvents.length}</span>
+              </div>
               {vizEvents.length === 0 ? (
                 <div className="muted">暂无事件</div>
               ) : (
@@ -930,9 +1220,36 @@ function IMPageInner() {
                   .slice(-6)
                   .reverse()
                   .map((evt) => (
-                    <div key={evt.id} style={{ marginBottom: 6 }}>
-                      <div style={{ fontWeight: 600 }}>{evt.label}</div>
-                      <div className="muted mono" style={{ fontSize: 11 }}>
+                    <div
+                      key={evt.id}
+                      style={{
+                        marginBottom: 8,
+                        paddingBottom: 8,
+                        borderBottom: "1px solid rgba(39,39,42,0.6)",
+                      }}
+                    >
+                      <div style={{ fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
+                        <span
+                          style={{
+                            width: 8,
+                            height: 8,
+                            borderRadius: 999,
+                            background:
+                              evt.kind === "agent"
+                                ? "#60a5fa"
+                                : evt.kind === "message"
+                                  ? "#fbbf24"
+                                  : evt.kind === "llm"
+                                    ? "#38bdf8"
+                                    : evt.kind === "tool"
+                                      ? "#f97316"
+                                      : "#a855f7",
+                            boxShadow: "0 0 8px rgba(0,0,0,0.5)",
+                          }}
+                        />
+                        <span>{evt.label}</span>
+                      </div>
+                      <div className="muted mono" style={{ fontSize: 11, marginTop: 4 }}>
                         {new Date(evt.at).toLocaleTimeString()}
                       </div>
                     </div>
@@ -1009,6 +1326,16 @@ function IMPageInner() {
           </div>
         </div>
       </section>
+      <style jsx global>{`
+        @keyframes viz-dash {
+          from {
+            stroke-dashoffset: 18;
+          }
+          to {
+            stroke-dashoffset: 0;
+          }
+        }
+      `}</style>
     </div>
   );
 }

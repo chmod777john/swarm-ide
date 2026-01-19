@@ -53,10 +53,17 @@ export async function GET(req: Request) {
 
       const keepalive = setInterval(sendKeepalive, 15_000);
 
+      let closed = false;
       const abortHandler = async () => {
+        if (closed) return;
+        closed = true;
         clearInterval(keepalive);
         upstashUnsubscribe?.();
-        controller.close();
+        try {
+          controller.close();
+        } catch {
+          // ignore double-close
+        }
       };
 
       if (req.signal.aborted) void abortHandler();

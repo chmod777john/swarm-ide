@@ -228,6 +228,8 @@ class AgentRunner {
   }
 
   private async processUntilIdle() {
+    const role = await store.getAgentRole({ agentId: this.agentId }).catch(() => null);
+    if (role === "human" || role === null) return;
     // eslint-disable-next-line no-constant-condition
     while (true) {
       const batches = await store.listUnreadByGroup({ agentId: this.agentId });
@@ -460,8 +462,22 @@ class AgentRunner {
         groupName: null,
       });
 
-      this.ensureRunner(to);
-      this.wakeAgent(to);
+      const directMembers = await store.listGroupMemberIds({ groupId: delivered.groupId });
+      getWorkspaceUIBus().emit(workspaceId, {
+        event: "ui.message.created",
+        data: {
+          workspaceId,
+          groupId: delivered.groupId,
+          memberIds: directMembers,
+          message: { id: delivered.messageId, senderId: this.agentId, sendTime: delivered.sendTime },
+        },
+      });
+
+      const toRole = await store.getAgentRole({ agentId: to }).catch(() => null);
+      if (toRole && toRole !== "human") {
+        this.ensureRunner(to);
+        this.wakeAgent(to);
+      }
 
       emitToolDone(true);
       return { ok: true, ...delivered };
@@ -539,7 +555,12 @@ class AgentRunner {
 
       getWorkspaceUIBus().emit(workspaceId, {
         event: "ui.message.created",
-        data: { workspaceId, groupId, message: { id: result.id, senderId: this.agentId, sendTime: result.sendTime } },
+        data: {
+          workspaceId,
+          groupId,
+          memberIds: members,
+          message: { id: result.id, senderId: this.agentId, sendTime: result.sendTime },
+        },
       });
 
       for (const memberId of members) {
@@ -591,6 +612,17 @@ class AgentRunner {
         senderId: this.agentId,
         content,
         contentType: args.contentType ?? "text",
+      });
+
+      const directMembers = await store.listGroupMemberIds({ groupId });
+      getWorkspaceUIBus().emit(workspaceId, {
+        event: "ui.message.created",
+        data: {
+          workspaceId,
+          groupId,
+          memberIds: directMembers,
+          message: { id: result.id, senderId: this.agentId, sendTime: result.sendTime },
+        },
       });
 
       this.ensureRunner(toAgentId);
@@ -818,6 +850,8 @@ export class AgentRuntime {
 
   async wakeAgent(agentId: UUID, reason: "direct_message" | "context_stream" = "direct_message") {
     await this.bootstrap();
+    const role = await store.getAgentRole({ agentId }).catch(() => null);
+    if (role === "human" || role === null) return;
     this.ensureRunner(agentId).wakeup(reason);
   }
 }

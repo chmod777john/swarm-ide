@@ -42,10 +42,16 @@ export async function POST(
     contentType: body.contentType ?? "text",
   });
 
+  const memberIds = await store.listGroupMemberIds({ groupId });
   const workspaceId = await store.getGroupWorkspaceId({ groupId });
   getWorkspaceUIBus().emit(workspaceId, {
     event: "ui.message.created",
-    data: { workspaceId, groupId, message: { id: result.id, senderId: body.senderId, sendTime: result.sendTime } },
+    data: {
+      workspaceId,
+      groupId,
+      memberIds,
+      message: { id: result.id, senderId: body.senderId, sendTime: result.sendTime },
+    },
   });
 
   const runtime = getAgentRuntime();
