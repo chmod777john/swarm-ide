@@ -181,6 +181,8 @@ function IMPageInner() {
   const esRef = useRef<EventSource | null>(null);
   const activeGroupIdRef = useRef<string | null>(null);
   const streamAgentIdRef = useRef<string | null>(null);
+  const streamAgentIdValueRef = useRef<string | null>(null);
+  const agentRoleByIdRef = useRef<Map<string, string>>(new Map());
   const toolCallBuffersRef = useRef<Map<string, string>>(new Map());
   const toolResultBuffersRef = useRef<Map<string, string>>(new Map());
   const uiEsRef = useRef<EventSource | null>(null);
@@ -618,8 +620,16 @@ function IMPageInner() {
   }, [activeGroupId]);
 
   useEffect(() => {
+    streamAgentIdValueRef.current = streamAgentId;
+  }, [streamAgentId]);
+
+  useEffect(() => {
     groupsRef.current = groups;
   }, [groups]);
+
+  useEffect(() => {
+    agentRoleByIdRef.current = agentRoleById;
+  }, [agentRoleById]);
 
   useEffect(() => {
     const el = vizRef.current;
@@ -683,7 +693,9 @@ function IMPageInner() {
         } else if (payload.event === "ui.message.created") {
           const senderId = payload.data?.message?.senderId as UUID | undefined;
           const groupId = payload.data?.groupId as UUID | undefined;
-          const senderRole = senderId ? agentRoleById.get(senderId) ?? senderId.slice(0, 6) : "unknown";
+          const senderRole = senderId
+            ? agentRoleByIdRef.current.get(senderId) ?? senderId.slice(0, 6)
+            : "unknown";
           pushVizEvent(payload, `消息: ${senderRole}`, "message");
           logVizDebug({
             type: "message_event",
@@ -719,7 +731,9 @@ function IMPageInner() {
           }
         } else if (payload.event === "ui.agent.llm.start" || payload.event === "ui.agent.llm.done") {
           const agentId = payload.data?.agentId as UUID | undefined;
-          const role = agentId ? agentRoleById.get(agentId) ?? agentId.slice(0, 6) : "agent";
+          const role = agentId
+            ? agentRoleByIdRef.current.get(agentId) ?? agentId.slice(0, 6)
+            : "agent";
           const label = payload.event === "ui.agent.llm.start" ? `LLM 开始: ${role}` : `LLM 结束: ${role}`;
           pushVizEvent(payload, label, "llm");
           if (agentId) {
@@ -734,7 +748,9 @@ function IMPageInner() {
         ) {
           const agentId = payload.data?.agentId as UUID | undefined;
           const toolName = payload.data?.toolName ?? "tool";
-          const role = agentId ? agentRoleById.get(agentId) ?? agentId.slice(0, 6) : "agent";
+          const role = agentId
+            ? agentRoleByIdRef.current.get(agentId) ?? agentId.slice(0, 6)
+            : "agent";
           const label =
             payload.event === "ui.agent.tool_call.start"
               ? `工具开始: ${role} · ${toolName}`
@@ -756,7 +772,7 @@ function IMPageInner() {
       // any change in workspace => refresh lists (cheap enough for MVP)
       void refreshGroups(session);
       void refreshAgents(session);
-      if (streamAgentId) void refreshLlmHistory(streamAgentId);
+      if (streamAgentIdValueRef.current) void refreshLlmHistory(streamAgentIdValueRef.current);
       if (activeGroupIdRef.current) {
         void refreshMessages(session, activeGroupIdRef.current, { markRead: false });
       }
@@ -767,7 +783,6 @@ function IMPageInner() {
 
     return () => es.close();
   }, [
-    agentRoleById,
     logVizDebug,
     pushBeam,
     pushVizEvent,
@@ -775,7 +790,6 @@ function IMPageInner() {
     refreshGroups,
     refreshLlmHistory,
     session,
-    streamAgentId,
   ]);
 
   useEffect(() => {

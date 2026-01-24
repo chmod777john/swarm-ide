@@ -42,6 +42,7 @@ export async function GET(req: Request) {
           "ui.agent.tool_call.done",
           "ui.db.write",
         ],
+        history: { start: "-" as any, end: "+" as any },
         onData: (evt) => {
           const payload = {
             event: evt.event,
