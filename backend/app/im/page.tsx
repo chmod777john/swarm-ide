@@ -211,28 +211,121 @@ function IMPageInner() {
   const vizLayout = useMemo(() => {
     const width = Math.max(1, vizSize.width);
     const height = Math.max(1, vizSize.height);
-    const center = { x: width / 2, y: height / 2 };
-    const radius = Math.max(60, Math.min(width, height) / 2 - 36);
-    const ordered = [...agents].sort(
-      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-    );
-    if (session) {
-      const humanIndex = ordered.findIndex((a) => a.id === session.humanAgentId);
-      if (humanIndex > -1) {
-        const [human] = ordered.splice(humanIndex, 1);
-        ordered.unshift(human);
+    const paddingX = 70;
+    const paddingY = 60;
+    const byId = new Map(agents.map((a) => [a.id, a]));
+    const childrenById = new Map<string, AgentMeta[]>();
+    const roots: AgentMeta[] = [];
+
+    for (const agent of agents) {
+      const parentId = agent.parentId;
+      if (parentId && parentId !== agent.id && byId.has(parentId)) {
+        const list = childrenById.get(parentId) ?? [];
+        list.push(agent);
+        childrenById.set(parentId, list);
+      } else {
+        roots.push(agent);
       }
     }
-    const step = (Math.PI * 2) / Math.max(1, ordered.length);
-    const positions = new Map<string, { x: number; y: number }>();
-    ordered.forEach((agent, idx) => {
-      const angle = Math.PI / 2 + idx * step;
-      positions.set(agent.id, {
-        x: center.x + Math.cos(angle) * radius,
-        y: center.y + Math.sin(angle) * radius,
-      });
+
+    const byCreatedAt = (a: AgentMeta, b: AgentMeta) =>
+      new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+
+    for (const list of childrenById.values()) list.sort(byCreatedAt);
+    roots.sort(byCreatedAt);
+
+    if (session) {
+      const humanIndex = roots.findIndex((a) => a.id === session.humanAgentId);
+      if (humanIndex > -1) {
+        const [human] = roots.splice(humanIndex, 1);
+        roots.unshift(human);
+      }
+    }
+
+    const nodeMeta = new Map<string, { xIndex: number; depth: number }>();
+    let leafIndex = 0;
+    let maxDepth = 0;
+    const visiting = new Set<string>();
+    const visited = new Set<string>();
+
+    const walk = (agent: AgentMeta, depth: number): { min: number; max: number } => {
+      if (visited.has(agent.id)) {
+        const meta = nodeMeta.get(agent.id);
+        if (meta) return { min: meta.xIndex, max: meta.xIndex };
+      }
+      if (visiting.has(agent.id)) {
+        const xIndex = leafIndex++;
+        nodeMeta.set(agent.id, { xIndex, depth });
+        return { min: xIndex, max: xIndex };
+      }
+
+      visiting.add(agent.id);
+      maxDepth = Math.max(maxDepth, depth);
+      const children = (childrenById.get(agent.id) ?? []).filter((child) => child.id !== agent.id);
+      let range: { min: number; max: number };
+      if (children.length === 0) {
+        const xIndex = leafIndex++;
+        nodeMeta.set(agent.id, { xIndex, depth });
+        range = { min: xIndex, max: xIndex };
+      } else {
+        const ranges = children.map((child) => walk(child, depth + 1));
+        const min = ranges[0]?.min ?? leafIndex;
+        const max = ranges[ranges.length - 1]?.max ?? min;
+        const xIndex = (min + max) / 2;
+        nodeMeta.set(agent.id, { xIndex, depth });
+        range = { min, max };
+      }
+      visiting.delete(agent.id);
+      visited.add(agent.id);
+      return range;
+    };
+
+    roots.forEach((root) => {
+      walk(root, 0);
     });
-    return { positions, ordered };
+
+    for (const agent of agents) {
+      if (!nodeMeta.has(agent.id)) {
+        walk(agent, 0);
+      }
+    }
+
+    const leafCount = Math.max(1, leafIndex);
+    const depthCount = Math.max(1, maxDepth + 1);
+    const baseSpan = Math.max(1, width - paddingX * 2);
+    const maxSpan =
+      leafCount <= 2 ? Math.min(baseSpan, 360) : leafCount <= 4 ? Math.min(baseSpan, 520) : baseSpan;
+    const xSpan = Math.max(1, maxSpan);
+    const xStart = (width - xSpan) / 2;
+    const ySpan = Math.max(1, height - paddingY * 2);
+    const xStep = leafCount === 1 ? 0 : xSpan / (leafCount - 1);
+    const yStep = depthCount === 1 ? 0 : ySpan / (depthCount - 1);
+
+    const positions = new Map<string, { x: number; y: number }>();
+    for (const agent of agents) {
+      const meta = nodeMeta.get(agent.id);
+      if (!meta) continue;
+      positions.set(agent.id, {
+        x: xStart + meta.xIndex * xStep,
+        y: paddingY + meta.depth * yStep,
+      });
+    }
+
+    const ordered = [...agents].sort((a, b) => {
+      const da = nodeMeta.get(a.id)?.depth ?? 0;
+      const db = nodeMeta.get(b.id)?.depth ?? 0;
+      if (da !== db) return da - db;
+      return byCreatedAt(a, b);
+    });
+
+    const edges: Array<{ fromId: UUID; toId: UUID }> = [];
+    for (const [parentId, children] of childrenById.entries()) {
+      for (const child of children) {
+        edges.push({ fromId: parentId, toId: child.id });
+      }
+    }
+
+    return { positions, ordered, edges };
   }, [agents, session, vizSize.height, vizSize.width]);
 
   const getGroupLabel = useCallback(
@@ -964,6 +1057,8 @@ function IMPageInner() {
           <div className="chat" style={{ flex: "1 1 50%" }}>
             {messages.map((m) => {
               const isMe = m.senderId === session?.humanAgentId;
+              const senderRole =
+                agentRoleById.get(m.senderId) ?? (isMe ? "human" : m.senderId.slice(0, 8));
               return (
                 <div
                   key={m.id}
@@ -975,7 +1070,7 @@ function IMPageInner() {
                 >
                   <div className={cx("bubble", isMe ? "me" : "other")}>
                     <div className="bubble-meta">
-                      {fmtTime(m.sendTime)} • {isMe ? "You" : m.senderId.slice(0, 8)}
+                      {fmtTime(m.sendTime)} • {senderRole}
                     </div>
                     <div>{m.content}</div>
                   </div>
@@ -1084,6 +1179,24 @@ function IMPageInner() {
                 height={vizSize.height}
                 style={{ position: "absolute", inset: 0 }}
               >
+                <g>
+                  {vizLayout.edges.map((edge) => {
+                    const from = vizLayout.positions.get(edge.fromId);
+                    const to = vizLayout.positions.get(edge.toId);
+                    if (!from || !to) return null;
+                    const midY = (from.y + to.y) / 2;
+                    const path = `M ${from.x} ${from.y} L ${from.x} ${midY} L ${to.x} ${midY} L ${to.x} ${to.y}`;
+                    return (
+                      <path
+                        key={`${edge.fromId}-${edge.toId}`}
+                        d={path}
+                        stroke="rgba(148,163,184,0.35)"
+                        strokeWidth={1.2}
+                        fill="none"
+                      />
+                    );
+                  })}
+                </g>
                 <AnimatePresence>
                   {vizBeams.map((beam) => {
                     const from = vizLayout.positions.get(beam.fromId);

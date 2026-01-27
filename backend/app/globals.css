@@ -50,6 +50,8 @@ textarea {
 .panel-mid {
   display: flex;
   flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .panel-right {
@@ -163,6 +165,7 @@ textarea {
   overflow: auto;
   padding: 16px;
   flex: 1;
+  min-height: 0;
 }
 
 .bubble {
@@ -235,4 +238,3 @@ textarea {
   margin: 12px 12px 0;
   font-size: 13px;
 }
-
