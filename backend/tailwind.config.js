@@ -10,16 +10,15 @@ export default {
   theme: {
     extend: {
       colors: {
-        border: '#27272a',
-        background: '#09090b',
-        foreground: '#fafafa',
+        border: 'hsl(var(--border))',
+        background: 'hsl(var(--background))',
+        foreground: 'hsl(var(--foreground))',
         muted: {
-          DEFAULT: '#27272a',
-          foreground: '#a1a1aa',
+          DEFAULT: 'hsl(var(--muted))',
+          foreground: 'hsl(var(--muted-foreground))',
         },
       },
     },
   },
   plugins: [],
 }
-
