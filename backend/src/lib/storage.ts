@@ -990,6 +990,7 @@ export const store = {
             id: groups.id,
             name: groups.name,
             workspaceId: groups.workspaceId,
+            contextTokens: groups.contextTokens,
             createdAt: groups.createdAt,
           })
           .from(groups)
@@ -1005,6 +1006,7 @@ export const store = {
             id: groups.id,
             name: groups.name,
             workspaceId: groups.workspaceId,
+            contextTokens: groups.contextTokens,
             createdAt: groups.createdAt,
           })
           .from(groups)
@@ -1071,6 +1073,7 @@ export const store = {
         name: g.name,
         memberIds: members.map((m) => m.userId),
         unreadCount,
+        contextTokens: g.contextTokens ?? 0,
         lastMessage: lastMessage[0]
           ? {
               content: lastMessage[0].content,
@@ -1085,6 +1088,27 @@ export const store = {
     }
 
     return result.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  },
+
+  async setGroupContextTokens(input: { groupId: UUID; tokens: number }) {
+    const db = getDb();
+    const group = await db
+      .select({ workspaceId: groups.workspaceId, contextTokens: groups.contextTokens })
+      .from(groups)
+      .where(eq(groups.id, input.groupId))
+      .limit(1);
+    if (group.length === 0) throw new Error("group not found");
+
+    await db.update(groups).set({ contextTokens: input.tokens }).where(eq(groups.id, input.groupId));
+
+    await emitDbWrite({
+      workspaceId: group[0]!.workspaceId,
+      table: "groups",
+      action: "update",
+      recordId: input.groupId,
+    });
+
+    return { contextTokens: input.tokens };
   },
 
   async listRecentWorkspaceMessages(input: { workspaceId: UUID; limit?: number }) {

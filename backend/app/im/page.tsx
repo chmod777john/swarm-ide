@@ -29,6 +29,7 @@ type Group = {
   name: string | null;
   memberIds: UUID[];
   unreadCount: number;
+  contextTokens: number;
   lastMessage?: {
     content: string;
     contentType: string;
@@ -169,6 +170,7 @@ function IMPageInner() {
   const searchParams = useSearchParams();
   const workspaceOverrideId = searchParams.get("workspaceId");
   const [session, setSession] = useState<WorkspaceDefaults | null>(() => null);
+  const [tokenLimit, setTokenLimit] = useState<number>(100000);
   const [groups, setGroups] = useState<Group[]>([]);
   const [agents, setAgents] = useState<AgentMeta[]>([]);
   const [activeGroupId, setActiveGroupId] = useState<string | null>(null);
@@ -525,6 +527,13 @@ function IMPageInner() {
     void refreshAgents(created);
     return created;
   }, [refreshAgents]);
+
+  // Load token limit config on mount
+  useEffect(() => {
+    api<{ tokenLimit: number }>("/api/config")
+      .then((c) => setTokenLimit(c.tokenLimit))
+      .catch(() => setTokenLimit(100000));
+  }, []);
 
   const refreshGroups = useCallback(async (s: WorkspaceDefaults, opts?: { silent?: boolean }) => {
     if (!opts?.silent) setStatus("groups");
@@ -1397,6 +1406,29 @@ function IMPageInner() {
                 <div className="muted" style={{ fontSize: 12, marginTop: 6, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {g.lastMessage ? g.lastMessage.content : "—"}
                 </div>
+                {/* Token usage bar - current context window */}
+                {g.contextTokens > 0 && (
+                  <div style={{ marginTop: 8 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 10, marginBottom: 2 }}>
+                      <span className="muted">Context</span>
+                      <span className="mono" style={{ color: (g.contextTokens / tokenLimit) > 0.8 ? "#ef4444" : (g.contextTokens / tokenLimit) > 0.5 ? "#facc15" : "#22c55e" }}>
+                        {g.contextTokens.toLocaleString()}
+                        <span className="muted" style={{ marginLeft: 4 }}>/ {tokenLimit.toLocaleString()}</span>
+                      </span>
+                    </div>
+                    <div style={{ height: 3, background: "#27272a", borderRadius: 2, overflow: "hidden" }}>
+                      <div
+                        style={{
+                          height: "100%",
+                          width: `${Math.min(100, (g.contextTokens / tokenLimit) * 100)}%`,
+                          background: (g.contextTokens / tokenLimit) > 0.8 ? "#ef4444" : (g.contextTokens / tokenLimit) > 0.5 ? "#facc15" : "#22c55e",
+                          borderRadius: 2,
+                          transition: "width 0.3s ease",
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
               </button>
             ))
           )}

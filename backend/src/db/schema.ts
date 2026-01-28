@@ -1,4 +1,4 @@
-import { pgTable, primaryKey, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import { integer, pgTable, primaryKey, text, timestamp, uuid } from "drizzle-orm/pg-core";
 
 export const workspaces = pgTable("workspaces", {
   id: uuid("id").primaryKey(),
@@ -23,6 +23,7 @@ export const groups = pgTable("groups", {
     .notNull()
     .references(() => workspaces.id),
   name: text("name"),
+  contextTokens: integer("context_tokens").default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
 });
 

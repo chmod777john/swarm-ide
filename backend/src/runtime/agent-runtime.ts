@@ -768,6 +768,19 @@ class AgentRunner {
     });
 
     const finalState = assembler.snapshot();
+
+    // Save token usage (current context window size)
+    if (finalState.usage && finalState.usage.totalTokens > 0) {
+      try {
+        await store.setGroupContextTokens({
+          groupId: ctx.groupId,
+          tokens: finalState.usage.totalTokens,
+        });
+      } catch {
+        // Best effort - don't fail if token tracking fails
+      }
+    }
+
     return {
       assistantText,
       assistantThinking,

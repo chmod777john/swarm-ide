@@ -15,6 +15,11 @@ type GLMChunk = {
     };
     finish_reason?: string | null;
   }>;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+  };
 };
 
 export type AssembledToolCall = {
@@ -24,11 +29,18 @@ export type AssembledToolCall = {
   argumentsText: string;
 };
 
+export type TokenUsage = {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+};
+
 export type GLMAssembledState = {
   reasoningContent: string;
   content: string;
   toolCalls: AssembledToolCall[];
   finishReason?: string | null;
+  usage?: TokenUsage;
 };
 
 export class GLMStreamAssembler {
@@ -36,6 +48,7 @@ export class GLMStreamAssembler {
   private content = "";
   private toolCalls = new Map<number, AssembledToolCall>();
   private finishReason: string | null | undefined = undefined;
+  private usage?: TokenUsage;
 
   push(chunk: GLMChunk): GLMAssembledState {
     const choice = chunk.choices?.[0];
@@ -66,6 +79,15 @@ export class GLMStreamAssembler {
       this.finishReason = choice.finish_reason;
     }
 
+    // Extract usage when available (usually on the final chunk)
+    if (chunk.usage) {
+      this.usage = {
+        promptTokens: chunk.usage.prompt_tokens ?? 0,
+        completionTokens: chunk.usage.completion_tokens ?? 0,
+        totalTokens: chunk.usage.total_tokens ?? 0,
+      };
+    }
+
     return this.snapshot();
   }
 
@@ -75,6 +97,7 @@ export class GLMStreamAssembler {
       content: this.content,
       toolCalls: [...this.toolCalls.values()].sort((a, b) => a.index - b.index),
       finishReason: this.finishReason,
+      usage: this.usage,
     };
   }
 }
