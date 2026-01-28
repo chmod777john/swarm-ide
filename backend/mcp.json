@@ -1,0 +1,33 @@
+{
+    "mcpServers": {
+        "tavily": {
+            "description": "Tavily Search - Advanced web search and content analysis",
+            "type": "stdio",
+            "command": "npx",
+            "args": [
+                "-y",
+                "tavily-mcp@0.2.3"
+            ],
+            "env": {
+                "TAVILY_API_KEY": "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"
+            },
+            "disabled": false
+        },
+        "chrome-devtools": {
+            "description": "Chrome DevTools - Browser automation and web scraping",
+            "type": "stdio",
+            "command": "npx",
+            "args": [
+                "-y",
+                "chrome-devtools-mcp@latest",
+                "--browserUrl=http://109.244.159.17:9999"
+            ],
+            "disabled": false
+        },
+            "PrimeMatrixData-http": {
+                "type": "http",
+      "url": "https://mcp.yidian.cn/mcp/16d05fda79166fdc7e1a0c5a8584ad5d"
+    }
+
+    }
+}

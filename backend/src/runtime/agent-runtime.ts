@@ -4,6 +4,7 @@ import { GLMStreamAssembler, parseSSEJsonLines } from "@/lib/glm-stream";
 import { AgentEventBus } from "./event-bus";
 import { createDeferred, safeJsonParse } from "./utils";
 import { getWorkspaceUIBus } from "./ui-bus";
+import { getMcpRegistry } from "./mcp";
 
 type UUID = string;
 
@@ -166,6 +167,16 @@ const AGENT_TOOLS = [
     },
   },
 ] as const;
+
+const BUILTIN_TOOL_NAMES = new Set(AGENT_TOOLS.map((tool) => tool.function.name));
+
+async function getAgentTools() {
+  const loadTimeoutMs =
+    Number(process.env.MCP_LOAD_TIMEOUT_MS) > 0 ? Number(process.env.MCP_LOAD_TIMEOUT_MS) : 2000;
+  const mcp = await getMcpRegistry(BUILTIN_TOOL_NAMES, { loadTimeoutMs });
+  const mcpTools = mcp.getToolDefinitions();
+  return [...AGENT_TOOLS, ...mcpTools];
+}
 
 function getGlmConfig() {
   const apiKey = process.env.GLM_API_KEY ?? process.env.ZHIPUAI_API_KEY ?? "";
@@ -649,6 +660,14 @@ class AgentRunner {
       return { ok: true, messages };
     }
 
+    const mcp = await getMcpRegistry(BUILTIN_TOOL_NAMES);
+    if (mcp.hasTool(name)) {
+      const args = safeJsonParse<Record<string, unknown>>(input.call.argumentsText, {});
+      const result = await mcp.callTool(name, args);
+      emitToolDone(result.ok);
+      return result;
+    }
+
     emitToolDone(false);
     return { ok: false, error: `Unknown tool: ${name}` };
   }
@@ -678,7 +697,7 @@ class AgentRunner {
       body: JSON.stringify({
         model,
         messages: history,
-        tools: AGENT_TOOLS,
+        tools: await getAgentTools(),
         tool_choice: "auto",
         stream: true,
         tool_stream: true,
