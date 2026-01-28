@@ -1525,26 +1525,21 @@ function IMPageInner() {
           </button>
         </div>
 
-        <div style={{ padding: 16, overflow: "auto", flex: 1, display: "flex", flexDirection: "column", gap: 12 }}>
+        <div
+          style={{
+            padding: 16,
+            overflow: "auto",
+            flex: 1,
+            minHeight: 0,
+            display: "flex",
+            flexDirection: "column",
+            gap: 12,
+          }}
+        >
           <div className="muted" style={{ fontSize: 12 }}>
             Streaming from: <span className="mono">{streamAgentId ?? "-"}</span>
           </div>
           {agentError ? <div className="toast" style={{ borderColor: "#713f12", background: "rgba(113,63,18,0.25)", color: "#fde68a" }}>{agentError}</div> : null}
-
-          <div className="card">
-            <div className="card-title">Realtime content</div>
-            <div className="card-body mono">{contentStream || "—"}</div>
-          </div>
-
-          <div className="card">
-            <div className="card-title">Realtime reasoning</div>
-            <div className="card-body mono">{reasoningStream || "—"}</div>
-          </div>
-
-          <div className="card">
-            <div className="card-title">Realtime tools</div>
-            <div className="card-body mono">{toolStream || "—"}</div>
-          </div>
 
           <div className="card">
             <div className="card-title">LLM history</div>
@@ -1579,6 +1574,21 @@ function IMPageInner() {
                 </pre>
               )}
             </div>
+          </div>
+
+          <div className="card">
+            <div className="card-title">Realtime content</div>
+            <div className="card-body mono">{contentStream || "—"}</div>
+          </div>
+
+          <div className="card">
+            <div className="card-title">Realtime reasoning</div>
+            <div className="card-body mono">{reasoningStream || "—"}</div>
+          </div>
+
+          <div className="card">
+            <div className="card-title">Realtime tools</div>
+            <div className="card-body mono">{toolStream || "—"}</div>
           </div>
         </div>
       </section>

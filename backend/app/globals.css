@@ -58,6 +58,8 @@ textarea {
   border-left-width: 1px;
   display: flex;
   flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .header {
