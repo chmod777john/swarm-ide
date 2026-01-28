@@ -172,6 +172,24 @@ textarea {
   min-height: 0;
 }
 
+.mid-stack {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 1fr 6px 1fr;
+}
+
+.mid-resizer {
+  cursor: row-resize;
+  background: transparent;
+  touch-action: none;
+  user-select: none;
+}
+
+.mid-resizer:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
 .bubble {
   max-width: 70%;
   border-radius: 18px;

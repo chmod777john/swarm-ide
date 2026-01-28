@@ -1,7 +1,7 @@
 "use client";
 
 import { useSearchParams } from "next/navigation";
-import type { PointerEvent as ReactPointerEvent } from "react";
+import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, TouchEvent as ReactTouchEvent } from "react";
 import { Fragment, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Briefcase, Code2, Network, User } from "lucide-react";
@@ -115,6 +115,9 @@ type AgentStreamEvent =
 const SESSION_KEY = "agent-wechat.session.v1";
 const RIGHT_PANEL_MIN_HEIGHT = 120;
 const RIGHT_PANEL_HEADER_HEIGHT = 32;
+const MID_CHAT_MIN_HEIGHT = 0;
+const MID_GRAPH_MIN_HEIGHT = 160;
+const MID_SPLITTER_SIZE = 6;
 
 function loadSession(): WorkspaceDefaults | null {
   try {
@@ -193,6 +196,8 @@ function IMPageInner() {
     { id: "reasoning", title: "Realtime reasoning", size: 220, collapsed: false },
     { id: "tools", title: "Realtime tools", size: 200, collapsed: false },
   ]);
+  const [midSplitRatio, setMidSplitRatio] = useState(0.55);
+  const [midStackHeight, setMidStackHeight] = useState(0);
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const esRef = useRef<EventSource | null>(null);
@@ -205,6 +210,8 @@ function IMPageInner() {
   const uiEsRef = useRef<EventSource | null>(null);
   const llmHistoryReqIdRef = useRef(0);
   const vizRef = useRef<HTMLDivElement | null>(null);
+  const midStackRef = useRef<HTMLDivElement | null>(null);
+  const midChatHeightRef = useRef(0);
   const groupsRef = useRef<Group[]>([]);
   const beamTimeoutsRef = useRef<number[]>([]);
   const refreshQueueRef = useRef<{
@@ -817,6 +824,20 @@ function IMPageInner() {
   }, []);
 
   useEffect(() => {
+    const el = midStackRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const rect = entry.contentRect;
+        if (!rect.height) continue;
+        setMidStackHeight(rect.height);
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
     const el = vizRef.current;
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
@@ -996,6 +1017,24 @@ function IMPageInner() {
     return "#22c55e";
   };
 
+  const midChatHeight = useMemo(() => {
+    if (!midStackHeight) return 0;
+    const available = Math.max(0, midStackHeight - MID_SPLITTER_SIZE);
+    if (available <= 0) return 0;
+    const minChat = MID_CHAT_MIN_HEIGHT;
+    const minGraph = MID_GRAPH_MIN_HEIGHT;
+    if (available <= minGraph + minChat) {
+      return Math.max(minChat, available - minGraph);
+    }
+    const maxChat = available - minGraph;
+    const desired = available * midSplitRatio;
+    return Math.min(maxChat, Math.max(minChat, desired));
+  }, [midSplitRatio, midStackHeight]);
+
+  useEffect(() => {
+    midChatHeightRef.current = midChatHeight;
+  }, [midChatHeight]);
+
   const toggleRightPanel = useCallback((id: RightPanelId) => {
     setRightPanels((prev) =>
       prev.map((panel) =>
@@ -1003,6 +1042,84 @@ function IMPageInner() {
       )
     );
   }, []);
+
+  const startMidResize = useCallback(
+    (clientY: number) => {
+      const container = midStackRef.current;
+      if (!container) return;
+      const rect = container.getBoundingClientRect();
+      const available = Math.max(0, rect.height - MID_SPLITTER_SIZE);
+      if (available <= 0) return;
+      const minChat = MID_CHAT_MIN_HEIGHT;
+      const minGraph = MID_GRAPH_MIN_HEIGHT;
+      const maxChat = Math.max(minChat, available - minGraph);
+      const startY = clientY;
+      const startHeight = midChatHeightRef.current || available * midSplitRatio;
+
+      const onMove = (e: PointerEvent | MouseEvent) => {
+        const delta = e.clientY - startY;
+        const next = Math.min(maxChat, Math.max(minChat, startHeight + delta));
+        const ratio = available ? next / available : 0.5;
+        setMidSplitRatio(ratio);
+      };
+
+      const onTouchMove = (e: TouchEvent) => {
+        const touch = e.touches[0];
+        if (!touch) return;
+        const delta = touch.clientY - startY;
+        const next =
+          available <= min * 2
+            ? Math.max(0, Math.min(available, startHeight + delta))
+            : Math.min(max, Math.max(min, startHeight + delta));
+        const ratio = available ? next / available : 0.5;
+        setMidSplitRatio(ratio);
+      };
+
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        window.removeEventListener("touchmove", onTouchMove);
+        window.removeEventListener("touchend", onUp);
+        document.body.style.cursor = "";
+      };
+
+      document.body.style.cursor = "row-resize";
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+      window.addEventListener("touchmove", onTouchMove, { passive: false });
+      window.addEventListener("touchend", onUp);
+    },
+    [midSplitRatio]
+  );
+
+  const handleMidResizeStart = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      startMidResize(event.clientY);
+    },
+    [startMidResize]
+  );
+
+  const handleMidMouseDown = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      startMidResize(event.clientY);
+    },
+    [startMidResize]
+  );
+
+  const handleMidTouchStart = useCallback(
+    (event: ReactTouchEvent<HTMLDivElement>) => {
+      const touch = event.touches[0];
+      if (!touch) return;
+      startMidResize(touch.clientY);
+    },
+    [startMidResize]
+  );
 
   const handleRightPanelResizeStart = useCallback(
     (index: number, event: ReactPointerEvent<HTMLDivElement>) => {
@@ -1180,8 +1297,12 @@ function IMPageInner() {
           </div>
         </div>
 
-        <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
-          <div className="chat" style={{ flex: "1 1 50%" }}>
+        <div className="mid-stack" ref={midStackRef} style={{
+          gridTemplateRows: midStackHeight > 0
+            ? `${Math.max(0, Math.round(midChatHeight))}px ${MID_SPLITTER_SIZE}px minmax(${MID_GRAPH_MIN_HEIGHT}px, 1fr)`
+            : `1fr ${MID_SPLITTER_SIZE}px minmax(${MID_GRAPH_MIN_HEIGHT}px, 1fr)`
+        }}>
+          <div className="chat">
             {messages.map((m) => {
               const isMe = m.senderId === session?.humanAgentId;
               const senderRole =
@@ -1209,10 +1330,16 @@ function IMPageInner() {
           </div>
 
           <div
+            className="mid-resizer"
+            onPointerDown={handleMidResizeStart}
+            onMouseDown={handleMidMouseDown}
+            onTouchStart={handleMidTouchStart}
+          />
+
+          <div
             ref={vizRef}
             style={{
               position: "relative",
-              flex: "1 1 50%",
               minHeight: 200,
               borderTop: "1px solid #27272a",
               background:
