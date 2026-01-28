@@ -198,6 +198,7 @@ function IMPageInner() {
   ]);
   const [midSplitRatio, setMidSplitRatio] = useState(0.55);
   const [midStackHeight, setMidStackHeight] = useState(0);
+  const [nodeOffsets, setNodeOffsets] = useState<Record<string, { x: number; y: number }>>({});
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const esRef = useRef<EventSource | null>(null);
@@ -212,6 +213,7 @@ function IMPageInner() {
   const vizRef = useRef<HTMLDivElement | null>(null);
   const midStackRef = useRef<HTMLDivElement | null>(null);
   const midChatHeightRef = useRef(0);
+  const nodeOffsetsRef = useRef<Record<string, { x: number; y: number }>>({});
   const groupsRef = useRef<Group[]>([]);
   const beamTimeoutsRef = useRef<number[]>([]);
   const refreshQueueRef = useRef<{
@@ -238,6 +240,7 @@ function IMPageInner() {
     const paddingX = 70;
     const paddingY = 60;
     const byId = new Map(agents.map((a) => [a.id, a]));
+    const parentById = new Map<string, string | null>();
     const childrenById = new Map<string, AgentMeta[]>();
     const roots: AgentMeta[] = [];
 
@@ -247,8 +250,10 @@ function IMPageInner() {
         const list = childrenById.get(parentId) ?? [];
         list.push(agent);
         childrenById.set(parentId, list);
+        parentById.set(agent.id, parentId);
       } else {
         roots.push(agent);
+        parentById.set(agent.id, null);
       }
     }
 
@@ -325,14 +330,44 @@ function IMPageInner() {
     const xStep = leafCount === 1 ? 0 : xSpan / (leafCount - 1);
     const yStep = depthCount === 1 ? 0 : ySpan / (depthCount - 1);
 
-    const positions = new Map<string, { x: number; y: number }>();
+    const basePositions = new Map<string, { x: number; y: number }>();
     for (const agent of agents) {
       const meta = nodeMeta.get(agent.id);
       if (!meta) continue;
-      positions.set(agent.id, {
+      basePositions.set(agent.id, {
         x: xStart + meta.xIndex * xStep,
         y: paddingY + meta.depth * yStep,
       });
+    }
+
+    const offsetCache = new Map<string, { x: number; y: number }>();
+    const positions = new Map<string, { x: number; y: number }>();
+    const getAccumulatedOffset = (id: string) => {
+      if (offsetCache.has(id)) return offsetCache.get(id)!;
+      let x = 0;
+      let y = 0;
+      const seen = new Set<string>();
+      let current: string | null | undefined = id;
+      while (current) {
+        if (seen.has(current)) break;
+        seen.add(current);
+        const offset = nodeOffsets[current];
+        if (offset) {
+          x += offset.x;
+          y += offset.y;
+        }
+        current = parentById.get(current) ?? null;
+      }
+      const total = { x, y };
+      offsetCache.set(id, total);
+      return total;
+    };
+
+    for (const agent of agents) {
+      const base = basePositions.get(agent.id);
+      if (!base) continue;
+      const offset = getAccumulatedOffset(agent.id);
+      positions.set(agent.id, { x: base.x + offset.x, y: base.y + offset.y });
     }
 
     const ordered = [...agents].sort((a, b) => {
@@ -349,8 +384,8 @@ function IMPageInner() {
       }
     }
 
-    return { positions, ordered, edges };
-  }, [agents, session, vizSize.height, vizSize.width]);
+    return { positions, ordered, edges, parentById };
+  }, [agents, session, vizSize.height, vizSize.width, nodeOffsets]);
 
   const getGroupLabel = useCallback(
     (g: Group | null | undefined) => {
@@ -810,6 +845,10 @@ function IMPageInner() {
   }, [agentRoleById]);
 
   useEffect(() => {
+    nodeOffsetsRef.current = nodeOffsets;
+  }, [nodeOffsets]);
+
+  useEffect(() => {
     const el = vizRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver((entries) => {
@@ -1160,6 +1199,81 @@ function IMPageInner() {
       window.addEventListener("pointerup", onUp);
     },
     [rightPanels]
+  );
+
+  const startNodeDrag = useCallback(
+    (id: string, clientX: number, clientY: number) => {
+      const startOffset = nodeOffsetsRef.current[id] ?? { x: 0, y: 0 };
+      const startX = clientX;
+      const startY = clientY;
+
+      const onMove = (e: PointerEvent | MouseEvent) => {
+        const dx = (e.clientX - startX) / (vizScale || 1);
+        const dy = (e.clientY - startY) / (vizScale || 1);
+        setNodeOffsets((prev) => ({
+          ...prev,
+          [id]: { x: startOffset.x + dx, y: startOffset.y + dy },
+        }));
+      };
+
+      const onTouchMove = (e: TouchEvent) => {
+        const touch = e.touches[0];
+        if (!touch) return;
+        const dx = (touch.clientX - startX) / (vizScale || 1);
+        const dy = (touch.clientY - startY) / (vizScale || 1);
+        setNodeOffsets((prev) => ({
+          ...prev,
+          [id]: { x: startOffset.x + dx, y: startOffset.y + dy },
+        }));
+      };
+
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        window.removeEventListener("touchmove", onTouchMove);
+        window.removeEventListener("touchend", onUp);
+        document.body.style.cursor = "";
+      };
+
+      document.body.style.cursor = "grabbing";
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+      window.addEventListener("touchmove", onTouchMove, { passive: false });
+      window.addEventListener("touchend", onUp);
+    },
+    [vizScale]
+  );
+
+  const handleNodePointerDown = useCallback(
+    (id: string, event: ReactPointerEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      startNodeDrag(id, event.clientX, event.clientY);
+    },
+    [startNodeDrag]
+  );
+
+  const handleNodeMouseDown = useCallback(
+    (id: string, event: ReactMouseEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      startNodeDrag(id, event.clientX, event.clientY);
+    },
+    [startNodeDrag]
+  );
+
+  const handleNodeTouchStart = useCallback(
+    (id: string, event: ReactTouchEvent<HTMLDivElement>) => {
+      event.stopPropagation();
+      const touch = event.touches[0];
+      if (!touch) return;
+      startNodeDrag(id, touch.clientX, touch.clientY);
+    },
+    [startNodeDrag]
   );
 
   const summarizeHistoryEntry = useCallback((entry: any, index: number, opts?: { omitRole?: boolean }) => {
@@ -1537,6 +1651,7 @@ function IMPageInner() {
                     initial={{ scale: 0, opacity: 0, x: pos.x, y: pos.y }}
                     animate={{ scale: 1, opacity: 1, x: pos.x, y: pos.y }}
                     transition={{ type: "spring", stiffness: 220, damping: 18 }}
+                    className="viz-node"
                     style={{
                       position: "absolute",
                       left: 0,
@@ -1545,9 +1660,12 @@ function IMPageInner() {
                       height: 90,
                       marginLeft: -45,
                       marginTop: -45,
-                      cursor: "pointer",
+                      cursor: "grab",
                     }}
                     title={agent.id}
+                    onPointerDown={(e) => handleNodePointerDown(agent.id, e)}
+                    onMouseDown={(e) => handleNodeMouseDown(agent.id, e)}
+                    onTouchStart={(e) => handleNodeTouchStart(agent.id, e)}
                   >
                     <div
                       style={{

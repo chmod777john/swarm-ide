@@ -186,6 +186,11 @@ textarea {
   user-select: none;
 }
 
+.viz-node {
+  touch-action: none;
+  user-select: none;
+}
+
 .mid-resizer:hover {
   background: rgba(255, 255, 255, 0.06);
 }
