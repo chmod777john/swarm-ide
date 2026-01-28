@@ -138,6 +138,7 @@ textarea {
   color: inherit;
   cursor: pointer;
   border-bottom: 1px solid #18181b;
+  position: relative;
 }
 
 .row:hover {
@@ -145,7 +146,8 @@ textarea {
 }
 
 .row.active {
-  background: #09090b;
+  background: #0b1220;
+  box-shadow: inset 3px 0 0 #38bdf8, inset 0 0 0 1px rgba(56, 189, 248, 0.15);
 }
 
 .badge {
@@ -227,6 +229,75 @@ textarea {
   white-space: pre-wrap;
   max-height: 260px;
   overflow: auto;
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.history-item {
+  border: 1px solid var(--accent, #27272a);
+  border-radius: 10px;
+  background: #070707;
+  overflow: hidden;
+  position: relative;
+}
+
+.history-item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--accent, #27272a);
+  opacity: 0.9;
+}
+
+.history-item summary {
+  cursor: pointer;
+  padding: 8px 10px;
+  font-weight: 600;
+  color: #e4e4e7;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 12px;
+}
+
+.history-item summary::-webkit-details-marker {
+  display: none;
+}
+
+.history-item-body {
+  border-top: 1px solid #27272a;
+  padding: 8px 10px;
+  color: #d4d4d8;
+}
+
+.history-role {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #0a0a0a;
+  background: var(--accent, #94a3b8);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.history-summary {
+  color: #e4e4e7;
+  font-weight: 600;
+}
+
+.history-item-body pre {
+  margin: 0;
+  white-space: pre-wrap;
+  font-family: inherit;
 }
 
 .toast {
