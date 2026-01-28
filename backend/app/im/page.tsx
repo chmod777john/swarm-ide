@@ -6,8 +6,13 @@ import { Fragment, Suspense, useCallback, useEffect, useMemo, useRef, useState }
 import { AnimatePresence, motion } from "framer-motion";
 import { Briefcase, Code2, Network, User } from "lucide-react";
 import { Streamdown } from "streamdown";
-import { code } from "@streamdown/code";
+import { createCodePlugin } from "@streamdown/code";
 import { mermaid } from "@streamdown/mermaid";
+
+// Create code plugin with dark theme
+const code = createCodePlugin({
+  themes: ["github-dark", "github-dark"], // Use dark theme for both light/dark modes
+});
 
 type UUID = string;
 
@@ -90,7 +95,6 @@ type RightPanelState = {
 };
 
 // Streamdown plugins for markdown rendering
-// Note: code and mermaid are pre-configured plugin instances, not functions
 const streamdownPlugins = [code, mermaid];
 
 // Helper component for rendering markdown content
@@ -1993,6 +1997,8 @@ function IMPageInner() {
           border-radius: 6px;
           padding: 12px;
           overflow-x: auto;
+          white-space: pre;
+          word-wrap: normal;
         }
         .sd-markdown code {
           background: #27272a;
@@ -2000,10 +2006,14 @@ function IMPageInner() {
           border-radius: 3px;
           font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
           font-size: 0.9em;
+          white-space: pre-wrap;
+          word-break: break-word;
         }
         .sd-markdown pre code {
           background: transparent;
           padding: 0;
+          white-space: pre;
+          word-break: normal;
         }
         .sd-markdown h1, .sd-markdown h2, .sd-markdown h3,
         .sd-markdown h4, .sd-markdown h5, .sd-markdown h6 {
