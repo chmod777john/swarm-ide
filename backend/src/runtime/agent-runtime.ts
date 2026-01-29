@@ -5,6 +5,9 @@ import { AgentEventBus } from "./event-bus";
 import { createDeferred, safeJsonParse } from "./utils";
 import { getWorkspaceUIBus } from "./ui-bus";
 import { getMcpRegistry } from "./mcp";
+import { exec } from "node:child_process";
+import { promisify } from "node:util";
+import path from "node:path";
 
 type UUID = string;
 
@@ -166,6 +169,25 @@ const AGENT_TOOLS = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "bash",
+      description:
+        "Run a shell command on the server. Returns stdout/stderr/exitCode. Use for debugging or file operations.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          command: { type: "string", description: "Shell command to execute" },
+          cwd: { type: "string", description: "Working directory (relative to workspace root or absolute)" },
+          timeoutMs: { type: "number", description: "Timeout in milliseconds (default 120000)" },
+          maxOutputKB: { type: "number", description: "Maximum combined output size in KB (default 1024)" },
+        },
+        required: ["command"],
+      },
+    },
+  },
 ] as const;
 
 const BUILTIN_TOOL_NAMES = new Set(AGENT_TOOLS.map((tool) => tool.function.name));
@@ -290,7 +312,8 @@ class AgentRunner {
           `Act strictly as this role when replying. Be concise and helpful.\n` +
           `Your replies are NOT automatically delivered to humans.\n` +
           `To send messages, you MUST call tools like send_group_message or send_direct_message.\n` +
-          `If you need to coordinate with other agents, you may use tools like self, list_agents, create, send, list_groups, list_group_members, create_group, send_group_message, send_direct_message, and get_group_messages.`,
+          `If you need to coordinate with other agents, you may use tools like self, list_agents, create, send, list_groups, list_group_members, create_group, send_group_message, send_direct_message, and get_group_messages.\n` +
+          `If you need to run shell commands, use the bash tool.`,
       });
     }
 
@@ -420,6 +443,66 @@ class AgentRunner {
       const role = await store.getAgentRole({ agentId: this.agentId }).catch(() => null);
       emitToolDone(true);
       return { ok: true, agentId: this.agentId, workspaceId, role };
+    }
+
+    if (name === "bash") {
+      const args = safeJsonParse<{
+        command?: string;
+        cwd?: string;
+        timeoutMs?: number;
+        maxOutputKB?: number;
+      }>(input.call.argumentsText, {});
+      const command = (args.command ?? "").trim();
+      if (!command) {
+        emitToolDone(false);
+        return { ok: false, error: "Missing command" };
+      }
+
+      const workspaceRoot = process.env.AGENT_WORKDIR ?? process.cwd();
+      const requestedCwd = (args.cwd ?? "").trim();
+      let finalCwd = workspaceRoot;
+      if (requestedCwd) {
+        const resolved = path.isAbsolute(requestedCwd)
+          ? requestedCwd
+          : path.resolve(workspaceRoot, requestedCwd);
+        const rootResolved = path.resolve(workspaceRoot);
+        if (!resolved.startsWith(rootResolved)) {
+          emitToolDone(false);
+          return { ok: false, error: "cwd must be within workspace root", workspaceRoot };
+        }
+        finalCwd = resolved;
+      }
+
+      const timeoutMs = Number(args.timeoutMs) > 0 ? Number(args.timeoutMs) : 120000;
+      const maxOutputKB = Number(args.maxOutputKB) > 0 ? Number(args.maxOutputKB) : 1024;
+      const maxBuffer = Math.max(64 * 1024, Math.floor(maxOutputKB * 1024));
+      const execAsync = promisify(exec);
+
+      try {
+        const { stdout, stderr } = await execAsync(command, {
+          cwd: finalCwd,
+          timeout: timeoutMs,
+          maxBuffer,
+          shell: "/bin/bash",
+        });
+        emitToolDone(true);
+        return { ok: true, stdout, stderr, exitCode: 0, cwd: finalCwd };
+      } catch (err: any) {
+        const stdout = err?.stdout ?? "";
+        const stderr = err?.stderr ?? "";
+        const exitCode = typeof err?.code === "number" ? err.code : null;
+        const signal = typeof err?.signal === "string" ? err.signal : null;
+        emitToolDone(false);
+        return {
+          ok: false,
+          stdout,
+          stderr,
+          exitCode,
+          signal,
+          cwd: finalCwd,
+          error: String(err?.message ?? err),
+        };
+      }
     }
 
     if (name === "create") {
