@@ -606,6 +606,26 @@ function IMPageInner() {
       }
     }
 
+    try {
+      const recent = await api<{
+        workspaces: Array<{ id: string; name: string; createdAt: string }>;
+      }>(`/api/workspaces`);
+      if (recent.workspaces.length > 0) {
+        const targetId = recent.workspaces[0]!.id;
+        const ensured = await api<WorkspaceDefaults>(
+          `/api/workspaces/${targetId}/defaults`
+        );
+        saveSession(ensured);
+        setSession(ensured);
+        setActiveGroupId(ensured.defaultGroupId);
+        setStatus("idle");
+        void refreshAgents(ensured);
+        return;
+      }
+    } catch {
+      // fall through
+    }
+
     const created = await api<WorkspaceDefaults>(`/api/workspaces`, {
       method: "POST",
       body: JSON.stringify({ name: "Default Workspace" }),
