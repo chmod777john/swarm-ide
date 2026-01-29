@@ -209,6 +209,7 @@ textarea {
 .viz-node {
   touch-action: none;
   user-select: none;
+  overflow: visible;
 }
 
 .mid-resizer:hover {
@@ -276,6 +277,76 @@ textarea {
   right: 12px;
   top: 12px;
   z-index: 2;
+}
+
+.viz-node.active .viz-reticle {
+  position: absolute;
+  inset: -22px;
+  border: 2px solid rgba(56, 189, 248, 0.85);
+  border-radius: 999px;
+  box-shadow: 0 0 24px rgba(56, 189, 248, 0.45);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.viz-node.active .viz-reticle::before,
+.viz-node.active .viz-reticle::after {
+  content: "";
+  position: absolute;
+  background: rgba(56, 189, 248, 0.8);
+}
+
+.viz-node.active .viz-reticle::before {
+  width: 2px;
+  height: calc(100% + 26px);
+  left: 50%;
+  top: -13px;
+  transform: translateX(-50%);
+}
+
+.viz-node.active .viz-reticle::after {
+  height: 2px;
+  width: calc(100% + 26px);
+  top: 50%;
+  left: -13px;
+  transform: translateY(-50%);
+}
+
+.viz-node.active {
+  z-index: 3;
+}
+
+.viz-node.active .viz-reticle::before,
+.viz-node.active .viz-reticle::after {
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.6);
+}
+
+@keyframes viz-reticle-pulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.9;
+  }
+  70% {
+    transform: scale(1.08);
+    opacity: 0.5;
+  }
+  100% {
+    transform: scale(1.12);
+    opacity: 0;
+  }
+}
+
+.viz-reticle-pulse {
+  position: absolute;
+  inset: -12px;
+  border-radius: 999px;
+  border: 2px solid rgba(56, 189, 248, 0.35);
+  animation: viz-reticle-pulse 2s ease-out infinite;
+}
+
+.viz-node.active {
+  z-index: 3;
+  filter: drop-shadow(0 0 12px rgba(56, 189, 248, 0.4));
 }
 
 .tree-caret,

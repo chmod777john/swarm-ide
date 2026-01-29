@@ -1221,10 +1221,7 @@ function IMPageInner() {
         const touch = e.touches[0];
         if (!touch) return;
         const delta = touch.clientY - startY;
-        const next =
-          available <= min * 2
-            ? Math.max(0, Math.min(available, startHeight + delta))
-            : Math.min(max, Math.max(min, startHeight + delta));
+        const next = Math.min(maxChat, Math.max(minChat, startHeight + delta));
         const ratio = available ? next / available : 0.5;
         setMidSplitRatio(ratio);
       };
@@ -1828,6 +1825,7 @@ function IMPageInner() {
                   const status = agentStatusById[agent.id] ?? "IDLE";
                   const ring = statusColor(status);
                   const isHuman = agent.role === "human";
+                  const isActive = streamAgentId === agent.id;
                   const Icon =
                     agent.role === "productmanager"
                       ? Briefcase
@@ -1842,7 +1840,7 @@ function IMPageInner() {
                       initial={{ scale: 0, opacity: 0, x: pos.x, y: pos.y }}
                       animate={{ scale: 1, opacity: 1, x: pos.x, y: pos.y }}
                       transition={{ type: "spring", stiffness: 220, damping: 18 }}
-                      className="viz-node"
+                      className={cx("viz-node", isActive && "active")}
                       style={{
                         position: "absolute",
                         left: 0,
@@ -1858,6 +1856,11 @@ function IMPageInner() {
                       onMouseDown={(e) => handleNodeMouseDown(agent.id, e)}
                       onTouchStart={(e) => handleNodeTouchStart(agent.id, e)}
                     >
+                      {isActive ? (
+                        <div className="viz-reticle">
+                          <div className="viz-reticle-pulse" />
+                        </div>
+                      ) : null}
                       <div
                         style={{
                           width: 90,
