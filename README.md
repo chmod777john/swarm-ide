@@ -2,7 +2,7 @@
 
 [English README](./README_EN.md)
 
-[![Demo](assets/image.png)](https://www.bilibili.com/video/BV1X163BQE5c/?share_source=copy_web&vd_source=e0705640ea2f51669a392fb07684e286)
+[![Demo](assets/image.jpg)](https://www.bilibili.com/video/BV1X163BQE5c/?share_source=copy_web&vd_source=e0705640ea2f51669a392fb07684e286)
 
 ## 🎬 视频【开源版 Kimi-K2.5 蜂群多 Agent】
 - Demo：

@@ -1,6 +1,6 @@
 # Swarm-IDE: Self-Organizing Agent Swarm
 
-[![Demo](assets/image.png)](https://www.bilibili.com/video/BV1X163BQE5c/?share_source=copy_web&vd_source=e0705640ea2f51669a392fb07684e286)
+[![Demo](assets/image.jpg)](https://www.bilibili.com/video/BV1X163BQE5c/?share_source=copy_web&vd_source=e0705640ea2f51669a392fb07684e286)
 
 ## 🎬 Video (Open‑source Kimi‑K2.5 Multi‑Agent Swarm)
 - Demo (inline playback):
