@@ -1,5 +1,6 @@
 import { store } from "@/lib/storage";
 import { GLMStreamAssembler, parseSSEJsonLines } from "@/lib/glm-stream";
+import { OpenAIStreamAssembler } from "@/lib/openai-stream";
 
 import { AgentEventBus } from "./event-bus";
 import { createDeferred, safeJsonParse } from "./utils";
@@ -218,6 +219,46 @@ function getGlmConfig() {
   return { apiKey, baseUrl, model };
 }
 
+type LlmProvider = "glm" | "openrouter";
+
+function getLlmProvider(): LlmProvider {
+  const raw = (process.env.LLM_PROVIDER ?? "glm").toLowerCase();
+  if (raw === "openrouter" || raw === "open-router" || raw === "or") return "openrouter";
+  return "glm";
+}
+
+function normalizeOpenRouterUrl(value: string) {
+  if (!value) return "https://openrouter.ai/api/v1/chat/completions";
+  if (value.endsWith("/chat/completions")) return value;
+  if (value.endsWith("/api/v1")) return `${value}/chat/completions`;
+  if (value.endsWith("/v1")) return `${value}/chat/completions`;
+  return value;
+}
+
+function getOpenRouterConfig() {
+  const apiKey = process.env.OPENROUTER_API_KEY ?? "";
+  const baseUrl = normalizeOpenRouterUrl(
+    process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1/chat/completions"
+  );
+  const model = process.env.OPENROUTER_MODEL ?? "";
+  const httpReferer = process.env.OPENROUTER_HTTP_REFERER ?? "";
+  const appTitle = process.env.OPENROUTER_APP_TITLE ?? "";
+
+  if (!apiKey) {
+    throw new Error("Missing OPENROUTER_API_KEY");
+  }
+
+  return { apiKey, baseUrl, model, httpReferer, appTitle };
+}
+
+function stripReasoningFromHistory(history: HistoryMessage[]) {
+  return history.map((msg) => {
+    if (msg.role === "tool") return msg;
+    const { reasoning_content: _omit, ...rest } = msg as Exclude<HistoryMessage, { role: "tool" }>;
+    return rest;
+  });
+}
+
 class AgentRunner {
   private wake = createDeferred<void>();
   private started = false;
@@ -363,7 +404,7 @@ class AgentRunner {
     let assistantThinking = "";
 
     for (let round = 0; round < maxToolRounds; round++) {
-      const res = await this.callGlmStreaming(input.history, {
+      const res = await this.callLlmStreaming(input.history, {
         workspaceId: input.workspaceId,
         groupId: input.groupId,
         round,
@@ -785,6 +826,142 @@ class AgentRunner {
 
     emitToolDone(false);
     return { ok: false, error: `Unknown tool: ${name}` };
+  }
+
+  private async callLlmStreaming(
+    history: HistoryMessage[],
+    ctx: { workspaceId: UUID; groupId: UUID; round: number }
+  ) {
+    const provider = getLlmProvider();
+    if (provider === "openrouter") {
+      return this.callOpenRouterStreaming(history, ctx);
+    }
+    return this.callGlmStreaming(history, ctx);
+  }
+
+  private async callOpenRouterStreaming(
+    history: HistoryMessage[],
+    ctx: { workspaceId: UUID; groupId: UUID; round: number }
+  ) {
+    const { apiKey, baseUrl, model, httpReferer, appTitle } = getOpenRouterConfig();
+
+    getWorkspaceUIBus().emit(ctx.workspaceId, {
+      event: "ui.agent.llm.start",
+      data: {
+        workspaceId: ctx.workspaceId,
+        agentId: this.agentId,
+        groupId: ctx.groupId,
+        round: ctx.round,
+      },
+    });
+
+    const tools = await getAgentTools();
+    const payload: Record<string, unknown> = {
+      messages: stripReasoningFromHistory(history),
+      stream: true,
+      stream_options: { include_usage: true },
+    };
+    if (model) payload.model = model;
+    if (tools.length > 0) {
+      payload.tools = tools;
+      payload.tool_choice = "auto";
+    }
+
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    };
+    if (httpReferer) headers["HTTP-Referer"] = httpReferer;
+    if (appTitle) headers["X-Title"] = appTitle;
+
+    const upstream = await fetch(baseUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    });
+
+    if (!upstream.ok || !upstream.body) {
+      const text = await upstream.text().catch(() => "");
+      throw new Error(`OpenRouter upstream error: ${upstream.status} ${text}`);
+    }
+
+    const assembler = new OpenAIStreamAssembler();
+    let prev = assembler.snapshot();
+    let assistantText = "";
+    let assistantThinking = "";
+
+    for await (const evt of parseSSEJsonLines(upstream.body)) {
+      const state = assembler.push(evt as any);
+
+      const reasoningDelta = state.reasoningContent.slice(prev.reasoningContent.length);
+      const contentDelta = state.content.slice(prev.content.length);
+      const toolCallDeltas = extractToolCallDeltas(evt as any, prev, state);
+
+      if (reasoningDelta) {
+        assistantThinking += reasoningDelta;
+        this.bus.emit(this.agentId, {
+          event: "agent.stream",
+          data: { kind: "reasoning", delta: reasoningDelta },
+        });
+      }
+
+      if (contentDelta) {
+        assistantText += contentDelta;
+        this.bus.emit(this.agentId, {
+          event: "agent.stream",
+          data: { kind: "content", delta: contentDelta },
+        });
+      }
+
+      for (const delta of toolCallDeltas) {
+        this.bus.emit(this.agentId, {
+          event: "agent.stream",
+          data: {
+            kind: "tool_calls",
+            delta: delta.delta,
+            tool_call_id: delta.tool_call_id,
+            tool_call_name: delta.tool_call_name,
+          },
+        });
+      }
+
+      prev = state;
+    }
+
+    this.bus.emit(this.agentId, {
+      event: "agent.done",
+      data: { finishReason: prev.finishReason ?? undefined },
+    });
+    getWorkspaceUIBus().emit(ctx.workspaceId, {
+      event: "ui.agent.llm.done",
+      data: {
+        workspaceId: ctx.workspaceId,
+        agentId: this.agentId,
+        groupId: ctx.groupId,
+        round: ctx.round,
+        finishReason: prev.finishReason ?? undefined,
+      },
+    });
+
+    const finalState = assembler.snapshot();
+
+    if (finalState.usage && finalState.usage.totalTokens > 0) {
+      try {
+        await store.setGroupContextTokens({
+          groupId: ctx.groupId,
+          tokens: finalState.usage.totalTokens,
+        });
+      } catch {
+        // Best effort - don't fail if token tracking fails
+      }
+    }
+
+    return {
+      assistantText,
+      assistantThinking,
+      toolCalls: (finalState.toolCalls ?? []) as ToolCall[],
+      finishReason: finalState.finishReason,
+    };
   }
 
   private async callGlmStreaming(
