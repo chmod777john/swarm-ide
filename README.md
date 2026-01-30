@@ -1,4 +1,4 @@
-# 为 Multi-Agent 设计的蜂群系统
+# Swarm-IDE: 自组织的Aget蜂群
 
 ![Demo](assets/image.png)
 
