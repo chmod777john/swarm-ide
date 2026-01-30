@@ -30,6 +30,20 @@ export type DemoEdge = {
   appearAt: number;
 };
 
+export type DemoEdgePulse = {
+  id: string;
+  from: string;
+  to: string;
+  start: number;
+  end: number;
+};
+
+export type DemoNodeStatus = {
+  id: string;
+  start: number;
+  end: number;
+};
+
 export type DemoPanelItem = {
   id: string;
   label: string;
@@ -48,12 +62,18 @@ export type DemoState = {
   messages: DemoMessage[];
   nodes: DemoNode[];
   edges: DemoEdge[];
+  graphNodes: DemoNode[];
+  graphEdges: DemoEdge[];
+  edgePulses: DemoEdgePulse[];
+  nodeStatusTimeline: DemoNodeStatus[];
+  sequenceStart: number;
   historyItems: DemoPanelItem[];
   historyEntries: any[];
   historyRole: (entry: any) => string;
   historyAccent: (role?: string) => string;
   summarizeHistoryEntry: (entry: any, idx: number, opts?: { omitRole?: boolean }) => string;
   toolItems: DemoPanelItem[];
+  toolTimeline: DemoPanelItem[];
   contentText: string;
   reasoningText: string;
 };
