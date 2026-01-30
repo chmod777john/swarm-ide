@@ -2,8 +2,8 @@
 
 ![Demo](assets/image.png)
 
-视频【开源版 Kimi-K2.5 蜂群多 Agent】  
-https://www.bilibili.com/video/BV1X163BQE5c/?share_source=copy_web&vd_source=e0705640ea2f51669a392fb07684e286
+## 🎬 视频【开源版 Kimi-K2.5 蜂群多 Agent】
+👉 https://www.bilibili.com/video/BV1X163BQE5c/?share_source=copy_web&vd_source=e0705640ea2f51669a392fb07684e286
 
 ## 优势
 - 任意动态创建 sub-agent
