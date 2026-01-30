@@ -8,6 +8,9 @@ import { Briefcase, ChevronDown, ChevronLeft, ChevronRight, Code2, Network, User
 import { Streamdown } from "streamdown";
 import { createCodePlugin } from "@streamdown/code";
 import { mermaid } from "@streamdown/mermaid";
+import { IMShell } from "./IMShell";
+import { IMMessageList } from "./IMMessageList";
+import { IMHistoryList } from "./IMHistoryList";
 
 // Create code plugin with dark theme
 const code = createCodePlugin({
@@ -1564,8 +1567,9 @@ function IMPageInner() {
   };
 
   return (
-    <div className="app dark">
-      <aside className="panel panel-left">
+    <IMShell
+      left={
+        <aside className="panel panel-left">
         <div className="header">
           <div>
             <div style={{ fontWeight: 700 }}>Workspace</div>
@@ -1607,9 +1611,10 @@ function IMPageInner() {
             </>
           )}
         </div>
-      </aside>
-
-      <main className="panel panel-mid">
+        </aside>
+      }
+      mid={
+        <main className="panel panel-mid">
         <div className="header">
           <div style={{ fontWeight: 700 }}>{title}</div>
           <div className="muted" style={{ fontSize: 12 }}>
@@ -1623,29 +1628,14 @@ function IMPageInner() {
             : `1fr ${MID_SPLITTER_SIZE}px minmax(${MID_GRAPH_MIN_HEIGHT}px, 1fr)`
         }}>
           <div className="chat">
-            {messages.map((m) => {
-              const isMe = m.senderId === session?.humanAgentId;
-              const senderRole =
-                agentRoleById.get(m.senderId) ?? (isMe ? "human" : m.senderId.slice(0, 8));
-              return (
-                <div
-                  key={m.id}
-                  style={{
-                    display: "flex",
-                    justifyContent: isMe ? "flex-end" : "flex-start",
-                    marginBottom: 10,
-                  }}
-                >
-                  <div className={cx("bubble", isMe ? "me" : "other")}>
-                    <div className="bubble-meta">
-                      {fmtTime(m.sendTime)} • {senderRole}
-                    </div>
-                    <MarkdownContent content={m.content} />
-                  </div>
-                </div>
-              );
-            })}
-
+            <IMMessageList
+              messages={messages}
+              humanAgentId={session?.humanAgentId ?? null}
+              agentRoleById={agentRoleById}
+              fmtTime={fmtTime}
+              renderContent={(content) => <MarkdownContent content={content} />}
+              cx={cx}
+            />
             <div ref={bottomRef} />
           </div>
 
@@ -2040,9 +2030,11 @@ function IMPageInner() {
             Send
           </button>
         </div>
-      </main>
-
-      <section className="panel panel-right">
+        </main>
+      }
+      right={
+        <>
+          <section className="panel panel-right">
         <div className="header">
           <div style={{ fontWeight: 700 }}>Agent Details</div>
         </div>
@@ -2083,29 +2075,12 @@ function IMPageInner() {
                     <div className={cx("agent-panel-body", "mono")}>
                       {panel.id === "history" ? (
                         Array.isArray(llmHistoryParsed) ? (
-                          <div className="history-list">
-                            {llmHistoryParsed.length === 0 ? (
-                              <div className="muted">—</div>
-                            ) : (
-                              llmHistoryParsed.map((entry, idx2) => (
-                                <details
-                                  key={entry?.id ?? `${idx2}`}
-                                  className="history-item"
-                                  style={{ ["--accent" as any]: historyAccent(historyRole(entry)) }}
-                                >
-                                  <summary>
-                                    <span className="history-role">{historyRole(entry)}</span>
-                                    <span className="history-summary">
-                                      {summarizeHistoryEntry(entry, idx2, { omitRole: true })}
-                                    </span>
-                                  </summary>
-                                  <div className="history-item-body">
-                                    <pre>{JSON.stringify(entry, null, 2)}</pre>
-                                  </div>
-                                </details>
-                              ))
-                            )}
-                          </div>
+                          <IMHistoryList
+                            entries={llmHistoryParsed}
+                            historyRole={historyRole}
+                            historyAccent={historyAccent}
+                            summarizeHistoryEntry={summarizeHistoryEntry}
+                          />
                         ) : (
                           <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
                             {llmHistoryFormatted || "—"}
@@ -2134,8 +2109,8 @@ function IMPageInner() {
             ))}
           </div>
         </div>
-      </section>
-      <style jsx global>{`
+          </section>
+          <style jsx global>{`
         @keyframes viz-dash {
           from {
             stroke-dashoffset: 18;
@@ -2145,6 +2120,8 @@ function IMPageInner() {
           }
         }
       `}</style>
-    </div>
+        </>
+      }
+    />
   );
 }
