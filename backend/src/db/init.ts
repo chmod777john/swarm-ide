@@ -26,6 +26,7 @@ export async function ensureSchema() {
       id uuid primary key,
       workspace_id uuid not null references workspaces(id),
       name text null,
+      context_tokens integer default 0,
       created_at timestamptz not null
     );
   `;
