@@ -1,5 +1,7 @@
 # Swarm-IDE: 自组织的Agent蜂群
 
+[English README](./README_EN.md)
+
 [![Demo](assets/image.png)](https://www.bilibili.com/video/BV1X163BQE5c/?share_source=copy_web&vd_source=e0705640ea2f51669a392fb07684e286)
 
 ## 🎬 视频【开源版 Kimi-K2.5 蜂群多 Agent】
@@ -7,9 +9,12 @@
 <video src="./assets/demo.mp4" width="100%" controls></video>
 - demo 视频：
 <a href="https://youtu.be/Fbg1P4wqm_I" target="_blank" rel="noopener noreferrer">
-  <img src="https://img.youtube.com/vi/Fbg1P4wqm_I/maxresdefault.jpg" alt="Demo Video" width="100%" />
+  <img src="https://img.youtube.com/vi/Fbg1P4wqm_I/hqdefault.jpg" alt="Demo Video" width="100%" />
 </a>
 - 详情视频： https://www.bilibili.com/video/BV1X163BQE5c/?share_source=copy_web&vd_source=e0705640ea2f51669a392fb07684e286
+
+## 加入微信群
+<img src="./assets/qrcode.png" alt="WeChat QR" width="240" />
 
 ## 知乎文章
 https://zhuanlan.zhihu.com/p/2000736341479138182
@@ -43,6 +48,9 @@ https://zhuanlan.zhihu.com/p/2000736341479138182
 cd agent-wechat
 cd backend
 
+cp .env.example .env.local
+# 在 .env.local 填写你的 KEY 和模型
+
 docker compose up -d
 curl -X POST http://127.0.0.1:3017/api/admin/init-db
 bun install
@@ -54,3 +62,9 @@ bun dev
 点击 init-db ，然后创建 workspace 即可开始对话。
 
 直接跟他说"创建 3 个儿子，给他们分别发消息，让他们再次自己创建 3 个孙子"
+
+## 环境变量说明
+后端读取 `backend/.env.local`，你需要填写：
+- `GLM_API_KEY` / `GLM_MODEL`（我使用的是 **GLM CodingPlan**）
+- `OPENROUTER_API_KEY` / `OPENROUTER_MODEL`（我使用的是 **OpenRouter Kimi 2.5**）
+- 其它连接项请参考 `backend/.env.example`
