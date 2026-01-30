@@ -5,12 +5,8 @@
 [![Demo](assets/image.png)](https://www.bilibili.com/video/BV1X163BQE5c/?share_source=copy_web&vd_source=e0705640ea2f51669a392fb07684e286)
 
 ## 🎬 视频【开源版 Kimi-K2.5 蜂群多 Agent】
-- Demo（本地文件）：
-<video src="./assets/demo.mp4" width="100%" controls></video>
-- demo 视频：
-<a href="https://youtu.be/Fbg1P4wqm_I" target="_blank" rel="noopener noreferrer">
-  <img src="https://img.youtube.com/vi/Fbg1P4wqm_I/hqdefault.jpg" alt="Demo Video" width="100%" />
-</a>
+- Demo：
+<video src="https://github.com/user-attachments/assets/4ebd88c6-bbdb-4714-87a5-54d1fed08db8" width="100%" controls></video>
 - 详情视频： https://www.bilibili.com/video/BV1X163BQE5c/?share_source=copy_web&vd_source=e0705640ea2f51669a392fb07684e286
 
 ## 加入微信群
