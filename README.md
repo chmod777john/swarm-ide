@@ -2,6 +2,12 @@
 
 [English README](./README_EN.md)
 
+<p align="center">
+  <a href="https://star-history.com/#chmod777john/agent-wechat&Date">
+    <img src="https://api.star-history.com/svg?repos=chmod777john/agent-wechat&type=Date" alt="Star History Chart" width="520" />
+  </a>
+</p>
+
 [![Demo](assets/image.jpg)](https://www.bilibili.com/video/BV1X163BQE5c/?share_source=copy_web&vd_source=e0705640ea2f51669a392fb07684e286)
 
 ## 🎬 视频【开源版 Kimi-K2.5 蜂群多 Agent】
