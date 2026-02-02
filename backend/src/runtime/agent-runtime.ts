@@ -6,6 +6,8 @@ import { AgentEventBus } from "./event-bus";
 import { createDeferred, safeJsonParse } from "./utils";
 import { getWorkspaceUIBus } from "./ui-bus";
 import { getMcpRegistry } from "./mcp";
+import { appendAgentHistorySnapshot, appendAgentStreamEvent } from "./agent-logger";
+import { formatSkillPrompt, getSkillLoader } from "./skill-loader";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
@@ -58,6 +60,22 @@ const AGENT_TOOLS = [
       name: "self",
       description: "Return the current agent's identity (agent_id, workspace_id, role).",
       parameters: { type: "object", additionalProperties: false, properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_skill",
+      description:
+        "Load the full content of a specific skill by name (use when the skill metadata indicates relevance).",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          skill_name: { type: "string", description: "Skill name to retrieve" },
+        },
+        required: ["skill_name"],
+      },
     },
   },
   {
@@ -299,6 +317,12 @@ class AgentRunner {
           event: "agent.error",
           data: { message: err instanceof Error ? err.message : String(err) },
         });
+        const message = err instanceof Error ? err.message : String(err);
+        void appendAgentStreamEvent({
+          agentId: this.agentId,
+          kind: "error",
+          error: message,
+        });
       } finally {
         this.running = false;
       }
@@ -347,6 +371,10 @@ class AgentRunner {
 
     if (history.length === 0) {
       const role = agent.role;
+      const skillsMetadata = await getSkillLoader()
+        .then((loader) => loader.getSkillsMetadataPrompt())
+        .catch(() => "");
+      const skillsBlock = skillsMetadata ? `\n\n${skillsMetadata}` : "";
       history.push({
         role: "system",
         content:
@@ -358,7 +386,8 @@ class AgentRunner {
           `Your replies are NOT automatically delivered to humans.\n` +
           `To send messages, you MUST call tools like send_group_message or send_direct_message.\n` +
           `If you need to coordinate with other agents, you may use tools like self, list_agents, create, send, list_groups, list_group_members, create_group, send_group_message, send_direct_message, and get_group_messages.\n` +
-          `If you need to run shell commands, use the bash tool.`,
+          `If you need to run shell commands, use the bash tool.` +
+          skillsBlock,
       });
     }
 
@@ -388,6 +417,16 @@ class AgentRunner {
       llmHistory: JSON.stringify(history),
       workspaceId,
     });
+    try {
+      await appendAgentHistorySnapshot({
+        agentId: this.agentId,
+        workspaceId,
+        groupId,
+        history,
+      });
+    } catch {
+      // best-effort logging
+    }
     getWorkspaceUIBus().emit(workspaceId, {
       event: "ui.agent.history.persisted",
       data: { workspaceId, agentId: this.agentId, groupId, historyLength: history.length },
@@ -441,6 +480,14 @@ class AgentRunner {
             tool_call_name: call.name,
           },
         });
+        void appendAgentStreamEvent({
+          agentId: this.agentId,
+          round,
+          kind: "tool_result",
+          delta: JSON.stringify(result),
+          tool_call_id: call.id,
+          tool_call_name: call.name,
+        });
         input.history.push({
           role: "tool",
           content: JSON.stringify(result),
@@ -488,6 +535,28 @@ class AgentRunner {
       const role = await store.getAgentRole({ agentId: this.agentId }).catch(() => null);
       emitToolDone(true);
       return { ok: true, agentId: this.agentId, workspaceId, role };
+    }
+
+    if (name === "get_skill") {
+      const args = safeJsonParse<{ skill_name?: string; name?: string }>(
+        input.call.argumentsText,
+        {}
+      );
+      const skillName = (args.skill_name ?? args.name ?? "").trim();
+      if (!skillName) {
+        emitToolDone(false);
+        return { ok: false, error: "Missing skill_name" };
+      }
+
+      const loader = await getSkillLoader();
+      const skill = await loader.getSkill(skillName);
+      if (!skill) {
+        emitToolDone(false);
+        return { ok: false, error: `Unknown skill: ${skillName}`, available: await loader.listSkills() };
+      }
+
+      emitToolDone(true);
+      return { ok: true, content: formatSkillPrompt(skill) };
     }
 
     if (name === "bash") {
@@ -854,6 +923,11 @@ class AgentRunner {
         round: ctx.round,
       },
     });
+    void appendAgentStreamEvent({
+      agentId: this.agentId,
+      round: ctx.round,
+      kind: "start",
+    });
 
     const tools = await getAgentTools();
     const payload: Record<string, unknown> = {
@@ -903,6 +977,12 @@ class AgentRunner {
           event: "agent.stream",
           data: { kind: "reasoning", delta: reasoningDelta },
         });
+        void appendAgentStreamEvent({
+          agentId: this.agentId,
+          round: ctx.round,
+          kind: "reasoning",
+          delta: reasoningDelta,
+        });
       }
 
       if (contentDelta) {
@@ -910,6 +990,12 @@ class AgentRunner {
         this.bus.emit(this.agentId, {
           event: "agent.stream",
           data: { kind: "content", delta: contentDelta },
+        });
+        void appendAgentStreamEvent({
+          agentId: this.agentId,
+          round: ctx.round,
+          kind: "content",
+          delta: contentDelta,
         });
       }
 
@@ -923,6 +1009,14 @@ class AgentRunner {
             tool_call_name: delta.tool_call_name,
           },
         });
+        void appendAgentStreamEvent({
+          agentId: this.agentId,
+          round: ctx.round,
+          kind: "tool_calls",
+          delta: delta.delta,
+          tool_call_id: delta.tool_call_id,
+          tool_call_name: delta.tool_call_name,
+        });
       }
 
       prev = state;
@@ -931,6 +1025,12 @@ class AgentRunner {
     this.bus.emit(this.agentId, {
       event: "agent.done",
       data: { finishReason: prev.finishReason ?? undefined },
+    });
+    void appendAgentStreamEvent({
+      agentId: this.agentId,
+      round: ctx.round,
+      kind: "done",
+      finishReason: prev.finishReason ?? null,
     });
     getWorkspaceUIBus().emit(ctx.workspaceId, {
       event: "ui.agent.llm.done",
@@ -979,6 +1079,11 @@ class AgentRunner {
         round: ctx.round,
       },
     });
+    void appendAgentStreamEvent({
+      agentId: this.agentId,
+      round: ctx.round,
+      kind: "start",
+    });
 
     const upstream = await fetch(baseUrl, {
       method: "POST",
@@ -1019,6 +1124,12 @@ class AgentRunner {
           event: "agent.stream",
           data: { kind: "reasoning", delta: reasoningDelta },
         });
+        void appendAgentStreamEvent({
+          agentId: this.agentId,
+          round: ctx.round,
+          kind: "reasoning",
+          delta: reasoningDelta,
+        });
       }
 
       if (contentDelta) {
@@ -1026,6 +1137,12 @@ class AgentRunner {
         this.bus.emit(this.agentId, {
           event: "agent.stream",
           data: { kind: "content", delta: contentDelta },
+        });
+        void appendAgentStreamEvent({
+          agentId: this.agentId,
+          round: ctx.round,
+          kind: "content",
+          delta: contentDelta,
         });
       }
 
@@ -1039,6 +1156,14 @@ class AgentRunner {
             tool_call_name: delta.tool_call_name,
           },
         });
+        void appendAgentStreamEvent({
+          agentId: this.agentId,
+          round: ctx.round,
+          kind: "tool_calls",
+          delta: delta.delta,
+          tool_call_id: delta.tool_call_id,
+          tool_call_name: delta.tool_call_name,
+        });
       }
 
       prev = state;
@@ -1047,6 +1172,12 @@ class AgentRunner {
     this.bus.emit(this.agentId, {
       event: "agent.done",
       data: { finishReason: prev.finishReason ?? undefined },
+    });
+    void appendAgentStreamEvent({
+      agentId: this.agentId,
+      round: ctx.round,
+      kind: "done",
+      finishReason: prev.finishReason ?? null,
     });
     getWorkspaceUIBus().emit(ctx.workspaceId, {
       event: "ui.agent.llm.done",
