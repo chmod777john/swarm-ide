@@ -6,6 +6,8 @@ export type SkillFrontmatter = {
   description?: string;
   license?: string;
   "allowed-tools"?: string[];
+  "auto-load"?: string | boolean;
+  auto_load?: string | boolean;
   metadata?: Record<string, string>;
 };
 
@@ -17,6 +19,7 @@ export type Skill = {
   skillDir: string;
   license?: string;
   allowedTools?: string[];
+  autoLoad?: boolean;
   metadata?: Record<string, string>;
 };
 
@@ -31,6 +34,13 @@ function parseScalar(value: string): string {
     return trimmed.slice(1, -1);
   }
   return trimmed;
+}
+
+function parseBoolean(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "true" || normalized === "1" || normalized === "yes" || normalized === "y";
 }
 
 function parseInlineList(value: string): string[] | null {
@@ -203,6 +213,10 @@ export class SkillLoader {
 
           const skillDir = path.dirname(skillFile);
           const content = processSkillPaths(match[2].trim(), skillDir);
+          const autoLoad = parseBoolean(
+            (frontmatter as Record<string, unknown>)["auto-load"] ??
+              (frontmatter as Record<string, unknown>)["auto_load"]
+          );
 
           const skill: Skill = {
             name: frontmatter.name,
@@ -212,6 +226,7 @@ export class SkillLoader {
             skillDir,
             license: frontmatter.license,
             allowedTools: frontmatter["allowed-tools"],
+            autoLoad,
             metadata: frontmatter.metadata,
           };
 
@@ -246,6 +261,11 @@ export class SkillLoader {
   async listSkills(): Promise<string[]> {
     await this.discoverSkills();
     return Array.from(this.skills.keys());
+  }
+
+  async listAutoLoadSkills(): Promise<Skill[]> {
+    await this.discoverSkills();
+    return Array.from(this.skills.values()).filter((skill) => skill.autoLoad);
   }
 
   async getSkill(name: string): Promise<Skill | null> {

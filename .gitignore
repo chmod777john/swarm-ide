@@ -12,6 +12,7 @@ backend/.next/
 backend/tsconfig.tsbuildinfo
 backend/.agent_logs/
 backend/.agent_stream_logs/
+backend/.agent_llm_requests/
 tmp/
 .gemini/
 .mcp.json

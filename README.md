@@ -2,6 +2,10 @@
 
 [English README](./README_EN.md)
 
+## 一键打开 Codespaces
+点击这里直接创建并打开 GitHub Codespaces：  
+https://github.com/codespaces/new?hide_repo_select=true&repo=chmod777john/swarm-ide
+
 <p align="center">
   <a href="https://star-history.com/#chmod777john/agent-wechat&Date">
     <img src="https://api.star-history.com/svg?repos=chmod777john/agent-wechat&type=Date" alt="Star History Chart" width="520" />

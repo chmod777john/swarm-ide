@@ -6,7 +6,7 @@ import { AgentEventBus } from "./event-bus";
 import { createDeferred, safeJsonParse } from "./utils";
 import { getWorkspaceUIBus } from "./ui-bus";
 import { getMcpRegistry } from "./mcp";
-import { appendAgentHistorySnapshot, appendAgentStreamEvent } from "./agent-logger";
+import { appendAgentHistorySnapshot, appendAgentLlmRequestRaw, appendAgentStreamEvent } from "./agent-logger";
 import { formatSkillPrompt, getSkillLoader } from "./skill-loader";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
@@ -29,6 +29,44 @@ type ToolCall = {
   name?: string;
   argumentsText: string;
 };
+
+const SKILLS_MARKER = "[skills:loaded]";
+
+async function buildSkillsBlock(): Promise<string> {
+  try {
+    const loader = await getSkillLoader();
+    const skillsMetadata = await loader.getSkillsMetadataPrompt();
+    const autoSkills = await loader.listAutoLoadSkills();
+    const autoBlocks = autoSkills.map((skill) => formatSkillPrompt(skill)).join("\n\n");
+    const skillsParts = [skillsMetadata, autoBlocks].filter((part) => part && part.trim());
+    if (skillsParts.length === 0) return "";
+    return `${SKILLS_MARKER}\n\n${skillsParts.join("\n\n")}`;
+  } catch {
+    return "";
+  }
+}
+
+function historyHasSkills(history: HistoryMessage[]) {
+  return history.some(
+    (msg) =>
+      msg.role === "system" && typeof msg.content === "string" && msg.content.includes(SKILLS_MARKER)
+  );
+}
+
+function mapOpenRouterMessages(history: HistoryMessage[]): Array<Record<string, unknown>> {
+  return history.map((msg) => {
+    if (msg.role === "tool") return msg;
+
+    const { reasoning_content, ...rest } = msg as Exclude<HistoryMessage, { role: "tool" }>;
+    const mapped: Record<string, unknown> = { ...rest };
+
+    if (msg.role === "assistant" && reasoning_content) {
+      mapped.reasoning = reasoning_content;
+    }
+
+    return mapped;
+  });
+}
 
 const AGENT_TOOLS = [
   {
@@ -269,14 +307,6 @@ function getOpenRouterConfig() {
   return { apiKey, baseUrl, model, httpReferer, appTitle };
 }
 
-function stripReasoningFromHistory(history: HistoryMessage[]) {
-  return history.map((msg) => {
-    if (msg.role === "tool") return msg;
-    const { reasoning_content: _omit, ...rest } = msg as Exclude<HistoryMessage, { role: "tool" }>;
-    return rest;
-  });
-}
-
 class AgentRunner {
   private wake = createDeferred<void>();
   private started = false;
@@ -292,7 +322,26 @@ class AgentRunner {
   start() {
     if (this.started) return;
     this.started = true;
+    void this.ensureSkillsLoaded();
     void this.loop();
+  }
+
+  private async ensureSkillsLoaded() {
+    try {
+      const agent = await store.getAgent({ agentId: this.agentId });
+      const parsed = safeJsonParse<unknown>(agent.llmHistory, {});
+      const history = Array.isArray(parsed) ? (parsed as HistoryMessage[]) : [];
+      if (historyHasSkills(history)) return;
+      const skillsBlock = await buildSkillsBlock();
+      if (!skillsBlock) return;
+      history.push({ role: "system", content: skillsBlock });
+      await store.setAgentHistory({
+        agentId: this.agentId,
+        llmHistory: JSON.stringify(history),
+      });
+    } catch {
+      // best-effort only
+    }
   }
 
   wakeup(reason: "manual" | "group_message" | "direct_message" | "context_stream" = "manual") {
@@ -368,13 +417,11 @@ class AgentRunner {
     const agent = await store.getAgent({ agentId: this.agentId });
     const parsed = safeJsonParse<unknown>(agent.llmHistory, {});
     const history = Array.isArray(parsed) ? (parsed as HistoryMessage[]) : [];
+    const skillsBlock = await buildSkillsBlock();
+    const hasSkills = historyHasSkills(history);
 
     if (history.length === 0) {
       const role = agent.role;
-      const skillsMetadata = await getSkillLoader()
-        .then((loader) => loader.getSkillsMetadataPrompt())
-        .catch(() => "");
-      const skillsBlock = skillsMetadata ? `\n\n${skillsMetadata}` : "";
       history.push({
         role: "system",
         content:
@@ -387,8 +434,10 @@ class AgentRunner {
           `To send messages, you MUST call tools like send_group_message or send_direct_message.\n` +
           `If you need to coordinate with other agents, you may use tools like self, list_agents, create, send, list_groups, list_group_members, create_group, send_group_message, send_direct_message, and get_group_messages.\n` +
           `If you need to run shell commands, use the bash tool.` +
-          skillsBlock,
+          (skillsBlock ? `\n\n${skillsBlock}` : ""),
       });
+    } else if (skillsBlock && !hasSkills) {
+      history.push({ role: "system", content: skillsBlock });
     }
 
     const userContent = unreadMessages
@@ -931,7 +980,8 @@ class AgentRunner {
 
     const tools = await getAgentTools();
     const payload: Record<string, unknown> = {
-      messages: stripReasoningFromHistory(history),
+      // Preserve reasoning for OpenRouter using the canonical "reasoning" field.
+      messages: mapOpenRouterMessages(history),
       stream: true,
       stream_options: { include_usage: true },
     };
@@ -948,10 +998,13 @@ class AgentRunner {
     if (httpReferer) headers["HTTP-Referer"] = httpReferer;
     if (appTitle) headers["X-Title"] = appTitle;
 
+    const requestBody = JSON.stringify(payload);
+    void appendAgentLlmRequestRaw({ agentId: this.agentId, body: requestBody });
+
     const upstream = await fetch(baseUrl, {
       method: "POST",
       headers,
-      body: JSON.stringify(payload),
+      body: requestBody,
     });
 
     if (!upstream.ok || !upstream.body) {
@@ -1085,20 +1138,24 @@ class AgentRunner {
       kind: "start",
     });
 
+    const glmPayload: Record<string, unknown> = {
+      model,
+      messages: history,
+      tools: await getAgentTools(),
+      tool_choice: "auto",
+      stream: true,
+      tool_stream: true,
+    };
+    const requestBody = JSON.stringify(glmPayload);
+    void appendAgentLlmRequestRaw({ agentId: this.agentId, body: requestBody });
+
     const upstream = await fetch(baseUrl, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        model,
-        messages: history,
-        tools: await getAgentTools(),
-        tool_choice: "auto",
-        stream: true,
-        tool_stream: true,
-      }),
+      body: requestBody,
     });
 
     if (!upstream.ok || !upstream.body) {

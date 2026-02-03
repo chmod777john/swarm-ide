@@ -21,7 +21,9 @@ type HistorySnapshot = {
 
 const DEFAULT_LOG_DIR = path.join(process.cwd(), ".agent_logs");
 const DEFAULT_STREAM_LOG_DIR = path.join(process.cwd(), ".agent_stream_logs");
+const DEFAULT_REQUEST_LOG_DIR = path.join(process.cwd(), ".agent_llm_requests");
 const streamQueues = new Map<string, Promise<void>>();
+const requestQueues = new Map<string, Promise<void>>();
 const orderedBuffers = new Map<
   string,
   {
@@ -49,10 +51,21 @@ function getStreamLogDir() {
   return process.env.AGENT_STREAM_LOG_DIR ?? DEFAULT_STREAM_LOG_DIR;
 }
 
+function getRequestLogDir() {
+  return process.env.AGENT_LLM_REQUEST_LOG_DIR ?? DEFAULT_REQUEST_LOG_DIR;
+}
+
 function enqueueStreamWrite(agentId: string, task: () => Promise<void>) {
   const prev = streamQueues.get(agentId) ?? Promise.resolve();
   const next = prev.catch(() => undefined).then(task);
   streamQueues.set(agentId, next);
+  return next;
+}
+
+function enqueueRequestWrite(agentId: string, task: () => Promise<void>) {
+  const prev = requestQueues.get(agentId) ?? Promise.resolve();
+  const next = prev.catch(() => undefined).then(task);
+  requestQueues.set(agentId, next);
   return next;
 }
 
@@ -161,6 +174,13 @@ export async function appendAgentStreamEvent(input: {
   } catch {
     // keep buffer for fallback flush
   }
+}
+
+export async function appendAgentLlmRequestRaw(input: { agentId: string; body: string }) {
+  const logDir = getRequestLogDir();
+  await ensureDir(logDir);
+  const filename = path.join(logDir, `agent-${input.agentId}.jsonl`);
+  await enqueueRequestWrite(input.agentId, () => fs.appendFile(filename, `${input.body}\n`, "utf-8"));
 }
 
 async function writeStreamHeader(agentId: string, logDir: string, text: string) {
