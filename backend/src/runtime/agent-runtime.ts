@@ -31,6 +31,7 @@ type ToolCall = {
 };
 
 const SKILLS_MARKER = "[skills:loaded]";
+const SEND_TOOL_NAMES = new Set(["send", "send_group_message", "send_direct_message"]);
 
 async function buildSkillsBlock(): Promise<string> {
   try {
@@ -450,7 +451,7 @@ class AgentRunner {
       await store.markGroupReadToMessage({ groupId, readerId: this.agentId, messageId: lastId });
     }
 
-    const { assistantText, assistantThinking } = await this.runWithTools({
+    const { assistantText, assistantThinking, didSend } = await this.runWithTools({
       groupId,
       workspaceId,
       history,
@@ -461,6 +462,28 @@ class AgentRunner {
       content: assistantText,
       reasoning_content: assistantThinking || undefined,
     });
+
+    if (!didSend) {
+      history.push({
+        role: "user",
+        content:
+          "你刚才没有调用 send_* 发送消息。\n" +
+          "如果本轮确实不需要发送，请明确回复“无需发送”。\n" +
+          "否则请使用 send_group_message 或 send_direct_message 发送。",
+      });
+
+      const followup = await this.runWithTools({
+        groupId,
+        workspaceId,
+        history,
+      });
+
+      history.push({
+        role: "assistant",
+        content: followup.assistantText,
+        reasoning_content: followup.assistantThinking || undefined,
+      });
+    }
     await store.setAgentHistory({
       agentId: this.agentId,
       llmHistory: JSON.stringify(history),
@@ -490,6 +513,7 @@ class AgentRunner {
     const maxToolRounds = 3;
     let assistantText = "";
     let assistantThinking = "";
+    let didSend = false;
 
     for (let round = 0; round < maxToolRounds; round++) {
       const res = await this.callLlmStreaming(input.history, {
@@ -501,7 +525,7 @@ class AgentRunner {
       assistantThinking = res.assistantThinking;
 
       if (res.toolCalls.length === 0) {
-        return { assistantText, assistantThinking };
+        return { assistantText, assistantThinking, didSend };
       }
 
       input.history.push({
@@ -516,6 +540,9 @@ class AgentRunner {
       });
 
       for (const call of res.toolCalls) {
+        if (call.name && SEND_TOOL_NAMES.has(call.name)) {
+          didSend = true;
+        }
         const result = await this.executeToolCall({
           groupId: input.groupId,
           call,
@@ -547,7 +574,7 @@ class AgentRunner {
 
     }
 
-    return { assistantText, assistantThinking };
+    return { assistantText, assistantThinking, didSend };
   }
 
   private async executeToolCall(input: { groupId: UUID; call: ToolCall }) {
