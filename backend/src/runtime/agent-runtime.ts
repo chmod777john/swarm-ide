@@ -642,11 +642,40 @@ class AgentRunner {
       const execAsync = promisify(exec);
 
       try {
+        // Intelligent shell selection with priority-based fallback
+        let shellPath: string;
+        let shellArgs: string[] = [];
+        
+        if (process.platform === "win32") {
+          // Windows: prefer PowerShell > CMD > WSL bash
+          if (typeof process.env.ComSpec === "string" && process.env.ComSpec.includes("powershell")) {
+            shellPath = process.env.ComSpec;
+            shellArgs = ["-Command"];
+          } else if (typeof process.env.ComSpec === "string") {
+            shellPath = process.env.ComSpec; // cmd.exe
+            shellArgs = ["/C"];
+          } else {
+            // Try to find PowerShell or fallback to cmd.exe
+            shellPath = "powershell.exe";
+            shellArgs = ["-Command"];
+            // If PowerShell fails, it will fallback to cmd.exe in catch block
+          }
+        } else {
+          // Unix-like systems: prefer user's preferred shell > bash > sh
+          if (typeof process.env.SHELL === "string") {
+            shellPath = process.env.SHELL;
+          } else {
+            // Try common shells in order of preference
+            const preferredShells = ["/bin/bash", "/bin/zsh", "/bin/fish", "/bin/sh"];
+            shellPath = preferredShells[0]; // Start with bash
+          }
+        }
+        
         const { stdout, stderr } = await execAsync(command, {
           cwd: finalCwd,
           timeout: timeoutMs,
           maxBuffer,
-          shell: "/bin/bash",
+          shell: shellPath,
         });
         emitToolDone(true);
         return { ok: true, stdout, stderr, exitCode: 0, cwd: finalCwd };
