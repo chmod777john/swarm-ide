@@ -1482,12 +1482,20 @@ function IMPageInner() {
     const prefixWidth = depth > 0 ? depth * guideWidth + guideWidth : 0;
     const previewIndent = tree ? prefixWidth + caretWidth + caretGap : 0;
     return (
-      <button
+      <div
         key={g.id}
         className={cx("row", g.id === activeGroupId && "active")}
         onClick={() => {
           setActiveGroupId(g.id);
         }}
+        onKeyPress={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setActiveGroupId(g.id);
+          }
+        }}
+        role="button"
+        tabIndex={0}
         style={{ paddingLeft: 16 }}
       >
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
@@ -1562,7 +1570,7 @@ function IMPageInner() {
             </div>
           </div>
         )}
-      </button>
+      </div>
     );
   };
 
