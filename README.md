@@ -2,10 +2,6 @@
 
 [English README](./README_EN.md)
 
-## 一键打开 Codespaces
-点击这里直接创建并打开 GitHub Codespaces：  
-https://github.com/codespaces/new?hide_repo_select=true&repo=chmod777john/swarm-ide
-
 <p align="center">
   <a href="https://star-history.com/#chmod777john/agent-wechat&Date">
     <img src="https://api.star-history.com/svg?repos=chmod777john/agent-wechat&type=Date" alt="Star History Chart" width="520" />
@@ -50,6 +46,15 @@ https://zhuanlan.zhihu.com/p/2000736341479138182
 只要有这两种能力，就能实现任意结构
 
 ## 运行方式
+提供两种方式：
+
+### 方式一：一键打开 Codespaces
+
+本系统要运行在 Linux 上，如果你没有 Linux 系统的话或者装环境遇到问题的话，可以尝试使用 GitHub 提供的免费虚拟机。点击链接创建虚拟机后，就可以执行后面的指令了
+
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://github.com/codespaces/new?hide_repo_select=true&repo=chmod777john/swarm-ide)
+
+### 方式二：本地运行
 ```
 cd agent-wechat
 cd backend
@@ -68,6 +73,39 @@ bun dev
 点击 init-db ，然后创建 workspace 即可开始对话。
 
 直接跟他说"创建 3 个儿子，给他们分别发消息，让他们再次自己创建 3 个孙子"
+
+### MCP 配置
+后端会自动加载 MCP 配置文件，支持以下位置（按优先级）：  
+1) `MCP_CONFIG_PATH` 指定的文件  
+2) 项目根目录：`mcp.json` / `.mcp.json`  
+3) `backend/`：`backend/mcp.json` / `backend/.mcp.json`
+
+最小示例（stdio/http/sse 任选其一）：  
+```json
+{
+  "mcpServers": {
+    "my-server": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["-m", "your_mcp_server_module"],
+      "env": { "TOKEN": "xxx" },
+      "timeoutMs": 30000
+    }
+  }
+}
+```
+
+字段说明（常用）：`type`、`command`/`args`、`url`/`httpUrl`/`sseUrl`、`headers`、`env`、`disabled`、`timeoutMs`。
+
+### Skill 支持
+后端会自动扫描技能目录并注入到新 agent 的系统提示中：
+- 默认扫描路径：`skills/` 或 `backend/skills/`
+- 可通过 `AGENT_SKILLS_DIR` 指定自定义路径
+- 在 `SKILL.md` 的 frontmatter 里设置 `auto-load: true` 可让该技能**自动注入**到新 agent
+
+技能使用方式：
+- 对应技能会出现在 “Available Skills” 列表
+- 需要时调用 `get_skill` 获取完整内容
 
 ## 环境变量说明
 后端读取 `backend/.env.local`，你需要填写：
