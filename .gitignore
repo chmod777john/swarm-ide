@@ -10,6 +10,8 @@ backend/.env.*
 backend/node_modules/
 backend/.next/
 backend/tsconfig.tsbuildinfo
+backend/.agent_logs/
+backend/.agent_stream_logs/
 tmp/
 .gemini/
 .mcp.json
