@@ -668,60 +668,130 @@ class AgentRunner {
       const maxBuffer = Math.max(64 * 1024, Math.floor(maxOutputKB * 1024));
       const execAsync = promisify(exec);
 
-      try {
-        // Intelligent shell selection with priority-based fallback
-        let shellPath: string;
-        let shellArgs: string[] = [];
+      // Intelligent shell selection with priority-based fallback
+      let shellPath: string;
+      let shellArgs: string[] = [];
+      let fallbackShells: Array<{path: string, args: string[]}> = [];
+      
+      if (process.platform === "win32") {
+        // Windows: prefer PowerShell > CMD > WSL bash
+        // Build priority list for fallback
+        fallbackShells = [];
         
-        if (process.platform === "win32") {
-          // Windows: prefer PowerShell > CMD > WSL bash
-          if (typeof process.env.ComSpec === "string" && process.env.ComSpec.includes("powershell")) {
-            shellPath = process.env.ComSpec;
-            shellArgs = ["-Command"];
-          } else if (typeof process.env.ComSpec === "string") {
-            shellPath = process.env.ComSpec; // cmd.exe
-            shellArgs = ["/C"];
-          } else {
-            // Try to find PowerShell or fallback to cmd.exe
-            shellPath = "powershell.exe";
-            shellArgs = ["-Command"];
-            // If PowerShell fails, it will fallback to cmd.exe in catch block
-          }
-        } else {
-          // Unix-like systems: prefer user's preferred shell > bash > sh
-          if (typeof process.env.SHELL === "string") {
-            shellPath = process.env.SHELL;
-          } else {
-            // Try common shells in order of preference
-            const preferredShells = ["/bin/bash", "/bin/zsh", "/bin/fish", "/bin/sh"];
-            shellPath = preferredShells[0]; // Start with bash
-          }
+        // 1. PowerShell from ComSpec (if it's PowerShell)
+        if (typeof process.env.ComSpec === "string" && process.env.ComSpec.includes("powershell")) {
+          fallbackShells.push({ path: process.env.ComSpec, args: ["-Command"] });
         }
         
-        const { stdout, stderr } = await execAsync(command, {
-          cwd: finalCwd,
-          timeout: timeoutMs,
-          maxBuffer,
-          shell: shellPath,
-        });
-        emitToolDone(true);
-        return { ok: true, stdout, stderr, exitCode: 0, cwd: finalCwd };
-      } catch (err: any) {
-        const stdout = err?.stdout ?? "";
-        const stderr = err?.stderr ?? "";
-        const exitCode = typeof err?.code === "number" ? err.code : null;
-        const signal = typeof err?.signal === "string" ? err.signal : null;
-        emitToolDone(false);
-        return {
-          ok: false,
-          stdout,
-          stderr,
-          exitCode,
-          signal,
-          cwd: finalCwd,
-          error: String(err?.message ?? err),
-        };
+        // 2. Standard PowerShell
+        fallbackShells.push({ path: "powershell.exe", args: ["-Command"] });
+        
+        // 3. PowerShell Core (cross-platform)
+        fallbackShells.push({ path: "pwsh.exe", args: ["-Command"] });
+        
+        // 4. CMD from ComSpec or default
+        if (typeof process.env.ComSpec === "string" && !process.env.ComSpec.includes("powershell")) {
+          fallbackShells.push({ path: process.env.ComSpec, args: ["/C"] });
+        }
+        fallbackShells.push({ path: "cmd.exe", args: ["/C"] });
+        
+        // 5. WSL (Windows Subsystem for Linux)
+        fallbackShells.push({ path: "wsl.exe", args: ["bash", "-c"] });
+      } else {
+        // Unix-like systems: prefer user's preferred shell > bash > sh
+        fallbackShells = [];
+        
+        // 1. User's preferred shell from SHELL env
+        if (typeof process.env.SHELL === "string") {
+          fallbackShells.push({ path: process.env.SHELL, args: ["-c"] });
+        }
+        
+        // Platform-specific preferences
+        if (process.platform === "darwin") {
+          // macOS: zsh is default since Catalina
+          fallbackShells.push({ path: "/bin/zsh", args: ["-c"] });
+        }
+        
+        // Common shells in order of preference
+        fallbackShells.push({ path: "/bin/bash", args: ["-c"] });
+        fallbackShells.push({ path: "/bin/zsh", args: ["-c"] });
+        fallbackShells.push({ path: "/bin/sh", args: ["-c"] });
+        fallbackShells.push({ path: "/bin/fish", args: ["-c"] });
       }
+      
+      // Try each shell in order until one works
+      let lastError: any = null;
+      for (const shell of fallbackShells) {
+        try {
+          shellPath = shell.path;
+          shellArgs = shell.args;
+          
+          // For exec function, we need to handle shells that require arguments
+          let finalCommand = command;
+          
+          // Special handling for WSL (wsl.exe needs bash -c "command")
+          if (shellPath.includes("wsl.exe") || shellPath.includes("wsl")) {
+            const escapedCommand = command.replace(/"/g, '\\"').replace(/\$/g, '\\$');
+            finalCommand = `bash -c "${escapedCommand}"`;
+          }
+          // Note: For PowerShell and CMD, exec's shell option automatically handles
+          // the appropriate arguments based on shell type
+          
+          const { stdout, stderr } = await execAsync(finalCommand, {
+            cwd: finalCwd,
+            timeout: timeoutMs,
+            maxBuffer,
+            shell: shellPath,
+          });
+          
+          emitToolDone(true);
+          return { 
+            ok: true, 
+            stdout, 
+            stderr, 
+            exitCode: 0, 
+            cwd: finalCwd,
+            shellInfo: {
+              shell: shellPath,
+              platform: process.platform,
+              args: shellArgs
+            }
+          };
+        } catch (err: any) {
+          lastError = err;
+          // Continue to try next shell
+          continue;
+        }
+      }
+      
+      // If we get here, all shells failed
+      emitToolDone(false);
+      
+      // Analyze error for better AI understanding
+      let errorSuggestion = "All shell attempts failed";
+      if (lastError?.code === 127 || lastError?.code === 1) {
+        errorSuggestion = "Command not found or permission denied. Check if the command exists and is executable.";
+      } else if (lastError?.code === "ETIMEDOUT" || lastError?.code === 124) {
+        errorSuggestion = "Command timed out. Consider simplifying the command or increasing timeout.";
+      } else if (lastError?.signal === "SIGKILL") {
+        errorSuggestion = "Command was killed due to resource limits. Check memory or output size limits.";
+      }
+      
+      return {
+        ok: false,
+        stdout: lastError?.stdout ?? "",
+        stderr: lastError?.stderr ?? "",
+        exitCode: typeof lastError?.code === "number" ? lastError.code : null,
+        signal: typeof lastError?.signal === "string" ? lastError.signal : null,
+        cwd: finalCwd,
+        error: `${errorSuggestion}: ${String(lastError?.message ?? lastError)}`,
+        details: {
+          platform: process.platform,
+          testedShells: fallbackShells.map(s => s.path),
+          suggestion: errorSuggestion,
+          rawError: String(lastError?.message ?? lastError)
+        }
+      };
     }
 
     if (name === "create") {
