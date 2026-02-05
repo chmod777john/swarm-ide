@@ -201,7 +201,7 @@ async function appendKindDelta(input: {
   tool_call_id?: string;
   tool_call_name?: string;
 }) {
-  const filename = path.join(logDir, `agent-${input.agentId}.${input.kind}.log`);
+  const filename = path.join(input.logDir, `agent-${input.agentId}.${input.kind}.log`);
   let text = input.delta;
 
   if (input.kind === "tool_calls" || input.kind === "tool_result") {

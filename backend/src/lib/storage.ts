@@ -1188,4 +1188,86 @@ export const store = {
       sendTime: m.sendTime.toISOString(),
     }));
   },
+
+  async deleteAgent(input: { agentId: UUID; workspaceId: UUID }) {
+    const db = getDb();
+    
+    // Check if agent exists
+    const agent = await db
+      .select({ id: agents.id, role: agents.role })
+      .from(agents)
+      .where(and(eq(agents.id, input.agentId), eq(agents.workspaceId, input.workspaceId)))
+      .limit(1);
+    
+    if (agent.length === 0) {
+      throw new Error(`Agent not found: ${input.agentId} in workspace ${input.workspaceId}`);
+    }
+
+    // Step 1: Recursively delete all child agents created by this agent
+    const childAgents = await db
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(
+        eq(agents.parentId, input.agentId),
+        eq(agents.workspaceId, input.workspaceId)
+      ));
+    
+    for (const child of childAgents) {
+      await this.deleteAgent({ 
+        agentId: child.id, 
+        workspaceId: input.workspaceId 
+      });
+    }
+
+    // Step 2: Find and delete the agent's dedicated group (group with name = agent's role)
+    // This group is created when the agent is created via createSubAgentWithP2P
+    // Find group by matching: same name as agent's role AND agent is a member of it
+    const dedicatedGroups = await db
+      .select({ id: groups.id })
+      .from(groups)
+      .innerJoin(groupMembers, eq(groupMembers.groupId, groups.id))
+      .where(and(
+        eq(groups.workspaceId, input.workspaceId),
+        eq(groups.name, agent[0]!.role),
+        eq(groupMembers.userId, input.agentId)
+      ))
+      .limit(1);
+    
+    if (dedicatedGroups.length > 0) {
+      const groupId = dedicatedGroups[0]!.id;
+      
+      // Delete all messages in this group
+      await db.delete(messages)
+        .where(eq(messages.groupId, groupId));
+      
+      // Delete group members
+      await db.delete(groupMembers)
+        .where(eq(groupMembers.groupId, groupId));
+      
+      // Delete the group itself
+      await db.delete(groups)
+        .where(eq(groups.id, groupId));
+    }
+
+    // Step 3: Delete agent from all other group memberships
+    // (Keep this for cleaning up membership in shared groups like default P2P group)
+    await db
+      .delete(groupMembers)
+      .where(eq(groupMembers.userId, input.agentId));
+    
+    // Step 4: Delete the agent record
+    await db
+      .delete(agents)
+      .where(and(eq(agents.id, input.agentId), eq(agents.workspaceId, input.workspaceId)));
+    
+    // Emit database write event
+    await emitDbWrite({
+      workspaceId: input.workspaceId,
+      table: "agents",
+      action: "delete",
+      recordId: input.agentId,
+    });
+
+    return { deleted: true, agentId: input.agentId };
+  },
 };

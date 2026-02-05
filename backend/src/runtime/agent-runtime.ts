@@ -69,6 +69,7 @@ function mapOpenRouterMessages(history: HistoryMessage[]): Array<Record<string, 
   });
 }
 
+// Agent 工具列表 
 const AGENT_TOOLS = [
   {
     type: "function",
@@ -247,6 +248,28 @@ const AGENT_TOOLS = [
           maxOutputKB: { type: "number", description: "Maximum combined output size in KB (default 1024)" },
         },
         required: ["command"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "delete_agent",
+      description: "Delete a specified sub-agent. Returns success status.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          agentId: {
+            type: "string",
+            description: "ID of the agent to delete",
+          },
+          force: {
+            type: "boolean",
+            description: "Force deletion without confirmation (default: false)",
+          },
+        },
+        required: ["agentId"],
       },
     },
   },
@@ -1058,6 +1081,51 @@ class AgentRunner {
       const messages = await store.listMessages({ groupId });
       emitToolDone(true);
       return { ok: true, messages };
+    }
+
+    if (name === "delete_agent") {
+      const args = safeJsonParse<{ agentId?: string; force?: boolean }>(input.call.argumentsText, {});
+      const targetAgentId = (args.agentId ?? "").trim();
+      const force = args.force ?? false;
+      
+      if (!targetAgentId) {
+        emitToolDone(false);
+        return { ok: false, error: "Missing agentId" };
+      }
+
+      // Check if the target agent exists
+      const targetRole = await store.getAgentRole({ agentId: targetAgentId }).catch(() => null);
+      if (!targetRole) {
+        emitToolDone(false);
+        return { ok: false, error: `Agent not found: ${targetAgentId}` };
+      }
+
+      // Check permissions: only allow deletion of sub-agents created by this agent
+      // or allow force deletion if force flag is true
+      const agents = await store.listAgentsMeta({ workspaceId });
+      const targetAgent = agents.find(a => a.id === targetAgentId);
+      
+      if (!force) {
+        // For now, only allow deletion if the current agent created the target agent
+        // This is a simple permission check; can be enhanced later
+        if (!targetAgent || targetAgent.parentId !== this.agentId) {
+          emitToolDone(false);
+          return { ok: false, error: `Permission denied: cannot delete agent ${targetAgentId}. Use force=true to override.` };
+        }
+      }
+
+      // Delete the agent
+      // Note: Assuming store has a deleteAgent method
+      await store.deleteAgent({ agentId: targetAgentId, workspaceId });
+
+      // Emit UI event
+      getWorkspaceUIBus().emit(workspaceId, {
+        event: "ui.agent.deleted",
+        data: { workspaceId, agent: { id: targetAgentId, role: targetRole, parentId: targetAgent?.parentId ?? null } },
+      });
+
+      emitToolDone(true);
+      return { ok: true, agentId: targetAgentId, deleted: true };
     }
 
     const mcp = await getMcpRegistry(BUILTIN_TOOL_NAMES);

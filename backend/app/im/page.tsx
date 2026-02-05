@@ -1131,6 +1131,20 @@ function IMPageInner() {
               [agentId]: payload.event === "ui.agent.tool_call.start" ? "BUSY" : "IDLE",
             }));
           }
+        } else if (payload.event === "ui.agent.deleted") {
+          const agentId = payload.data?.agent?.id as UUID | undefined;
+          const role = payload.data?.agent?.role ?? "agent";
+          
+          // 直接从本地状态中移除已删除的代理，避免 UI 延迟
+          if (agentId) {
+            setAgents((prev) => prev.filter((a) => a.id !== agentId));
+            setAgentStatusById((prev) => {
+              const next = { ...prev };
+              delete next[agentId];
+              return next;
+            });
+          }
+          pushVizEvent(payload, `删除 ${role}`, "agent");
         } else if (payload.event === "ui.db.write") {
           const table = payload.data?.table ?? "db";
           const action = payload.data?.action ?? "write";
