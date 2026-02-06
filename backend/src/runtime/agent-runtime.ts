@@ -312,6 +312,7 @@ class AgentRunner {
   private wake = createDeferred<void>();
   private started = false;
   private running = false;
+  private interruptRequested = false;
 
   constructor(
     private readonly agentId: UUID,
@@ -354,6 +355,18 @@ class AgentRunner {
     });
   }
 
+  requestInterrupt() {
+    this.interruptRequested = true;
+    this.wake.resolve();
+    this.wake = createDeferred<void>();
+  }
+
+  private consumeInterruptRequest() {
+    if (!this.interruptRequested) return false;
+    this.interruptRequested = false;
+    return true;
+  }
+
   private async loop() {
     // eslint-disable-next-line no-constant-condition
     while (true) {
@@ -382,8 +395,10 @@ class AgentRunner {
   private async processUntilIdle() {
     const role = await store.getAgentRole({ agentId: this.agentId }).catch(() => null);
     if (role === "human" || role === null) return;
+    if (this.consumeInterruptRequest()) return;
     // eslint-disable-next-line no-constant-condition
     while (true) {
+      if (this.consumeInterruptRequest()) return;
       const batches = await store.listUnreadByGroup({ agentId: this.agentId });
       if (batches.length === 0) return;
 
@@ -399,7 +414,9 @@ class AgentRunner {
       });
 
       for (const batch of batches) {
+        if (this.consumeInterruptRequest()) return;
         await this.processGroupUnread(batch.groupId, batch.messages);
+        if (this.consumeInterruptRequest()) return;
       }
     }
   }
@@ -463,7 +480,7 @@ class AgentRunner {
       reasoning_content: assistantThinking || undefined,
     });
 
-    if (!didSend) {
+    if (!didSend && !this.interruptRequested) {
       history.push({
         role: "user",
         content:
@@ -1390,6 +1407,19 @@ export class AgentRuntime {
     const role = await store.getAgentRole({ agentId }).catch(() => null);
     if (role === "human" || role === null) return;
     this.ensureRunner(agentId).wakeup(reason);
+  }
+
+  async interruptAll(input?: { workspaceId?: UUID }) {
+    await this.bootstrap();
+    const workspaceId = input?.workspaceId?.trim();
+    const agents = await store.listAgents(workspaceId ? { workspaceId } : undefined);
+    const agentIds = agents.filter((agent) => agent.role !== "human").map((agent) => agent.id);
+
+    for (const agentId of agentIds) {
+      this.ensureRunner(agentId).requestInterrupt();
+    }
+
+    return { interrupted: agentIds.length, agentIds };
   }
 }
 

@@ -202,6 +202,7 @@ function IMPageInner() {
   const [draft, setDraft] = useState("");
   const [status, setStatus] = useState<"boot" | "groups" | "messages" | "send" | "idle">("boot");
   const [error, setError] = useState<string | null>(null);
+  const [stoppingAgents, setStoppingAgents] = useState(false);
 
   const [contentStream, setContentStream] = useState("");
   const [reasoningStream, setReasoningStream] = useState("");
@@ -886,6 +887,38 @@ function IMPageInner() {
     }
   }, [connectAgentStream, refreshGroups, session]);
 
+  const onInterruptAllAgents = useCallback(async () => {
+    if (!session || stoppingAgents) return;
+
+    setStoppingAgents(true);
+    setError(null);
+    setAgentError(null);
+
+    try {
+      const res = await api<{ ok: boolean; interrupted: number; agentIds: string[] }>(
+        `/api/agents/interrupt-all`,
+        {
+          method: "POST",
+          body: JSON.stringify({ workspaceId: session.workspaceId }),
+        }
+      );
+
+      setAgentStatusById((prev) => {
+        const next = { ...prev };
+        const ids = res.agentIds.length > 0 ? res.agentIds : agents.map((agent) => agent.id);
+        for (const id of ids) {
+          next[id] = "IDLE";
+        }
+        return next;
+      });
+      setStatus("idle");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setStoppingAgents(false);
+    }
+  }, [agents, session, stoppingAgents]);
+
   const onSend = useCallback(async () => {
     if (!session || !activeGroupId) return;
     const text = draft.trim();
@@ -1131,6 +1164,19 @@ function IMPageInner() {
               [agentId]: payload.event === "ui.agent.tool_call.start" ? "BUSY" : "IDLE",
             }));
           }
+        } else if (payload.event === "ui.agent.interrupt_all") {
+          pushVizEvent(payload, "停止全部 Agent", "agent");
+          const ids = Array.isArray(payload.data?.agentIds)
+            ? (payload.data.agentIds as UUID[])
+            : [];
+          setAgentStatusById((prev) => {
+            const next = { ...prev };
+            const targetIds = ids.length > 0 ? ids : Object.keys(next);
+            for (const id of targetIds) {
+              next[id] = "IDLE";
+            }
+            return next;
+          });
         } else if (payload.event === "ui.db.write") {
           const table = payload.data?.table ?? "db";
           const action = payload.data?.action ?? "write";
@@ -1617,8 +1663,25 @@ function IMPageInner() {
         <main className="panel panel-mid">
         <div className="header">
           <div style={{ fontWeight: 700 }}>{title}</div>
-          <div className="muted" style={{ fontSize: 12 }}>
-            {status !== "idle" ? `${status}...` : ""}
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <button
+              className="btn"
+              style={{
+                padding: "4px 10px",
+                fontSize: 12,
+                borderColor: "#7f1d1d",
+                background: stoppingAgents ? "#450a0a" : "#1f0b0b",
+                color: "#fecaca",
+              }}
+              onClick={() => void onInterruptAllAgents()}
+              disabled={!session || stoppingAgents}
+              title="停止所有 agent 当前循环"
+            >
+              {stoppingAgents ? "Stopping..." : "Stop All Agents"}
+            </button>
+            <div className="muted" style={{ fontSize: 12 }}>
+              {status !== "idle" ? `${status}...` : ""}
+            </div>
           </div>
         </div>
 
