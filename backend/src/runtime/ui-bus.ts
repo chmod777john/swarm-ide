@@ -68,6 +68,12 @@ export type UIEvent =
   | {
       id: number;
       at: number;
+      event: "ui.agent.interrupt_all";
+      data: { workspaceId: string; interrupted: number; agentIds: string[] };
+    }
+  | {
+      id: number;
+      at: number;
       event: "ui.db.write";
       data: {
         workspaceId: string;

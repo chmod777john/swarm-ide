@@ -426,6 +426,7 @@ class AgentRunner {
   private wake = createDeferred<void>();
   private started = false;
   private running = false;
+  private interruptRequested = false;
 
   constructor(
     private readonly agentId: UUID,
@@ -473,6 +474,18 @@ class AgentRunner {
     });
   }
 
+  requestInterrupt() {
+    this.interruptRequested = true;
+    this.wake.resolve();
+    this.wake = createDeferred<void>();
+  }
+
+  private consumeInterruptRequest() {
+    if (!this.interruptRequested) return false;
+    this.interruptRequested = false;
+    return true;
+  }
+
   /** 主循环：等待唤醒后开始处理未读消息 */
   private async loop() {
     // eslint-disable-next-line no-constant-condition
@@ -505,9 +518,11 @@ class AgentRunner {
     // 若代理是 human 类型则直接返回
     const role = await store.getAgentRole({ agentId: this.agentId }).catch(() => null);
     if (role === "human" || role === null) return;
+    if (this.consumeInterruptRequest()) return;
     // eslint-disable-next-line no-constant-condition
     while (true) {
       // 查询未读消息批次（按群组拆分）
+      if (this.consumeInterruptRequest()) return;
       const batches = await store.listUnreadByGroup({ agentId: this.agentId });
       if (batches.length === 0) return; // 无更多未读
 
@@ -525,7 +540,9 @@ class AgentRunner {
 
       // 逐批处理
       for (const batch of batches) {
+        if (this.consumeInterruptRequest()) return;
         await this.processGroupUnread(batch.groupId, batch.messages);
+        if (this.consumeInterruptRequest()) return;
       }
     }
   }
@@ -597,14 +614,11 @@ class AgentRunner {
       reasoning_content: assistantThinking || undefined,
     });
 
-    if (!didSend) {
-      // 若未调用任何 send_* 工具，提示需要发送或明确不发送
+    if (!didSend && !this.interruptRequested) {
       history.push({
         role: "user",
         content:
-          "你刚才没有调用 send_* 发送消息。\n" +
-          "如果本轮确实不需要发送，请明确回复“无需发送”。\n" +
-          "否则请使用 send_group_message 或 send_direct_message 发送。",
+          "Reminder: 本轮未调用 send_*。先判断是否需要对外可见；需要时使用 send_group_message 或 send_direct_message，无需时可不发送。",
       });
 
       // 再次运行一次工具循环，强制让代理做出决定
@@ -1698,6 +1712,19 @@ export class AgentRuntime {
     const role = await store.getAgentRole({ agentId }).catch(() => null);
     if (role === "human" || role === null) return;
     this.ensureRunner(agentId).wakeup(reason);
+  }
+
+  async interruptAll(input?: { workspaceId?: UUID }) {
+    await this.bootstrap();
+    const workspaceId = input?.workspaceId?.trim();
+    const agents = await store.listAgents(workspaceId ? { workspaceId } : undefined);
+    const agentIds = agents.filter((agent) => agent.role !== "human").map((agent) => agent.id);
+
+    for (const agentId of agentIds) {
+      this.ensureRunner(agentId).requestInterrupt();
+    }
+
+    return { interrupted: agentIds.length, agentIds };
   }
 }
 
