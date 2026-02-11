@@ -81,6 +81,12 @@ export type UIEvent =
         action: "insert" | "update" | "delete";
         recordId?: string | null;
       };
+    }
+  | {
+      id: number;
+      at: number;
+      event: "ui.agent.deleted";
+      data: { workspaceId: string; agent: { id: string; role: string; parentId: string | null } };
     };
 
 type Listener = (evt: UIEvent) => void;

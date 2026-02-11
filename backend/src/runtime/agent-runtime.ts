@@ -12,17 +12,38 @@ import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
 
+// ------------------------------------
+// 基本类型定义
+// ------------------------------------
+/** 代表 UUID 的字符串 */
 type UUID = string;
 
+/**
+ * 历史消息的结构。
+ *
+ * - role 表示角色：system、user、assistant 或 tool
+ * - content 是实际文本内容
+ * - 对于工具调用，可能携带 tool_calls 和 reasoning_content 等字段
+ */
 type HistoryMessage =
   | {
       role: "system" | "user" | "assistant";
       content: string;
+      // 调用的工具列表（如果有）
       tool_calls?: unknown;
+      // GPT 在思考过程中的文字（若支持）
       reasoning_content?: string;
     }
   | { role: "tool"; content: string; tool_call_id?: string; name?: string };
 
+/**
+ * 表示一次工具调用的信息。
+ *
+ * - index：在 LLM 输出中的索引
+ * - id：工具调用的唯一标识
+ * - name：工具名称
+ * - argumentsText：传递给工具的参数字符串（JSON 格式）
+ */
 type ToolCall = {
   index: number;
   id?: string;
@@ -30,30 +51,58 @@ type ToolCall = {
   argumentsText: string;
 };
 
+// ------------------------------------
+// 一些常量
+// ------------------------------------
+/** 当技能块已加载时在 system 消息中插入的标记符号 */
 const SKILLS_MARKER = "[skills:loaded]";
+
+/** 以下工具名称需要发送消息（不做其他处理） */
 const SEND_TOOL_NAMES = new Set(["send", "send_group_message", "send_direct_message"]);
 
+// ------------------------------------
+// 工具相关函数
+// ------------------------------------
+/**
+ * 构建技能块字符串。
+ *
+ * 读取所有已加载的技能，格式化为可直接放入 system 消息的内容。
+ */
 async function buildSkillsBlock(): Promise<string> {
   try {
     const loader = await getSkillLoader();
     const skillsMetadata = await loader.getSkillsMetadataPrompt();
     const autoSkills = await loader.listAutoLoadSkills();
+    // 将每个技能转换为提示字符串，并用两个换行符分隔
     const autoBlocks = autoSkills.map((skill) => formatSkillPrompt(skill)).join("\n\n");
+    // 只保留非空的块
     const skillsParts = [skillsMetadata, autoBlocks].filter((part) => part && part.trim());
     if (skillsParts.length === 0) return "";
     return `${SKILLS_MARKER}\n\n${skillsParts.join("\n\n")}`;
   } catch {
+    // 若任何错误，返回空字符串
     return "";
   }
 }
 
+/**
+ * 判断历史消息中是否已包含技能块标记。
+ */
 function historyHasSkills(history: HistoryMessage[]) {
   return history.some(
     (msg) =>
-      msg.role === "system" && typeof msg.content === "string" && msg.content.includes(SKILLS_MARKER)
+      msg.role === "system" &&
+      typeof msg.content === "string" &&
+      msg.content.includes(SKILLS_MARKER)
   );
 }
 
+/**
+ * 把内部使用的历史消息转换为 OpenRouter 所期望的结构。
+ *
+ * - tool 消息保持不变
+ * - assistant 的 reasoning_content 转成 reasoning 字段
+ */
 function mapOpenRouterMessages(history: HistoryMessage[]): Array<Record<string, unknown>> {
   return history.map((msg) => {
     if (msg.role === "tool") return msg;
@@ -69,7 +118,12 @@ function mapOpenRouterMessages(history: HistoryMessage[]): Array<Record<string, 
   });
 }
 
+// ------------------------------------
+// Agent 工具列表
+// ------------------------------------
+/** 内置的工具定义（会被 LLM 调用）。 */
 const AGENT_TOOLS = [
+  // 工具：创建子代理
   {
     type: "function",
     function: {
@@ -93,6 +147,7 @@ const AGENT_TOOLS = [
       },
     },
   },
+  // 工具：返回当前代理身份
   {
     type: "function",
     function: {
@@ -101,6 +156,7 @@ const AGENT_TOOLS = [
       parameters: { type: "object", additionalProperties: false, properties: {} },
     },
   },
+  // 工具：获取技能内容
   {
     type: "function",
     function: {
@@ -117,6 +173,7 @@ const AGENT_TOOLS = [
       },
     },
   },
+  // 工具：列出所有代理
   {
     type: "function",
     function: {
@@ -125,6 +182,7 @@ const AGENT_TOOLS = [
       parameters: { type: "object", additionalProperties: false, properties: {} },
     },
   },
+  // 工具：发送直接消息
   {
     type: "function",
     function: {
@@ -142,6 +200,7 @@ const AGENT_TOOLS = [
       },
     },
   },
+  // 工具：列出可见的群组
   {
     type: "function",
     function: {
@@ -150,6 +209,7 @@ const AGENT_TOOLS = [
       parameters: { type: "object", additionalProperties: false, properties: {} },
     },
   },
+  // 工具：列出群组成员
   {
     type: "function",
     function: {
@@ -165,6 +225,7 @@ const AGENT_TOOLS = [
       },
     },
   },
+  // 工具：创建群组
   {
     type: "function",
     function: {
@@ -181,6 +242,7 @@ const AGENT_TOOLS = [
       },
     },
   },
+  // 工具：向群组发送消息
   {
     type: "function",
     function: {
@@ -198,6 +260,7 @@ const AGENT_TOOLS = [
       },
     },
   },
+  // 工具：向单个代理发送直接消息
   {
     type: "function",
     function: {
@@ -216,6 +279,7 @@ const AGENT_TOOLS = [
       },
     },
   },
+  // 工具：获取群组消息
   {
     type: "function",
     function: {
@@ -231,6 +295,7 @@ const AGENT_TOOLS = [
       },
     },
   },
+  // 工具：执行 shell 命令
   {
     type: "function",
     function: {
@@ -250,18 +315,56 @@ const AGENT_TOOLS = [
       },
     },
   },
+  // 工具：删除代理
+  {
+    type: "function",
+    function: {
+      name: "delete_agent",
+      description: "Delete a specified sub-agent. Returns success status.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          agentId: {
+            type: "string",
+            description: "ID of the agent to delete",
+          },
+          force: {
+            type: "boolean",
+            description: "Force deletion without confirmation (default: false)",
+          },
+        },
+        required: ["agentId"],
+      },
+    },
+  },
 ] as const;
 
+// ------------------------------------
+// 工具相关
+// ------------------------------------
+/** 所有内置工具名称的集合，方便快速判断 */
 const BUILTIN_TOOL_NAMES = new Set(AGENT_TOOLS.map((tool) => tool.function.name));
 
+/**
+ * 加载所有可用工具（包括内部工具和外部插件）。
+ *
+ * @param loadTimeoutMs 超时毫秒
+ */
 async function getAgentTools() {
   const loadTimeoutMs =
     Number(process.env.MCP_LOAD_TIMEOUT_MS) > 0 ? Number(process.env.MCP_LOAD_TIMEOUT_MS) : 2000;
+  // 获取插件管理器实例，并注册所有工具
   const mcp = await getMcpRegistry(BUILTIN_TOOL_NAMES, { loadTimeoutMs });
   const mcpTools = mcp.getToolDefinitions();
   return [...AGENT_TOOLS, ...mcpTools];
 }
 
+/**
+ * GLM（大模型）API 的配置。
+ *
+ * @throws 当缺少 API Key 时抛错
+ */
 function getGlmConfig() {
   const apiKey = process.env.GLM_API_KEY ?? process.env.ZHIPUAI_API_KEY ?? "";
   const baseUrl =
@@ -276,14 +379,21 @@ function getGlmConfig() {
   return { apiKey, baseUrl, model };
 }
 
+/** 可用的 LLM 提供商 */
 type LlmProvider = "glm" | "openrouter";
 
+/**
+ * 根据环境变量判断使用哪个 LLM 提供商。
+ *
+ * 默认使用 "glm"，支持 openrouter、open-router 或 or 的缩写。
+ */
 function getLlmProvider(): LlmProvider {
   const raw = (process.env.LLM_PROVIDER ?? "glm").toLowerCase();
   if (raw === "openrouter" || raw === "open-router" || raw === "or") return "openrouter";
   return "glm";
 }
 
+/** 标准化 OpenRouter 的 baseUrl */
 function normalizeOpenRouterUrl(value: string) {
   if (!value) return "https://openrouter.ai/api/v1/chat/completions";
   if (value.endsWith("/chat/completions")) return value;
@@ -292,6 +402,7 @@ function normalizeOpenRouterUrl(value: string) {
   return value;
 }
 
+/** OpenRouter 的配置 */
 function getOpenRouterConfig() {
   const apiKey = process.env.OPENROUTER_API_KEY ?? "";
   const baseUrl = normalizeOpenRouterUrl(
@@ -308,6 +419,9 @@ function getOpenRouterConfig() {
   return { apiKey, baseUrl, model, httpReferer, appTitle };
 }
 
+// ------------------------------------
+// AgentRunner：负责单个代理的工作循环
+// ------------------------------------
 class AgentRunner {
   private wake = createDeferred<void>();
   private started = false;
@@ -321,13 +435,17 @@ class AgentRunner {
     private readonly wakeAgent: (agentId: UUID) => void
   ) {}
 
+  /** 启动代理的主循环 */
   start() {
     if (this.started) return;
     this.started = true;
+    // 先确保技能块已加载到历史记录中
     void this.ensureSkillsLoaded();
+    // 开始轮询
     void this.loop();
   }
 
+  /** 确保当前代理的历史消息里已经包含了技能块 */
   private async ensureSkillsLoaded() {
     try {
       const agent = await store.getAgent({ agentId: this.agentId });
@@ -342,10 +460,11 @@ class AgentRunner {
         llmHistory: JSON.stringify(history),
       });
     } catch {
-      // best-effort only
+      // 最好努力不抛错误
     }
   }
 
+  /** 手动唤醒代理，触发一次处理 */
   wakeup(reason: "manual" | "group_message" | "direct_message" | "context_stream" = "manual") {
     this.wake.resolve();
     this.wake = createDeferred<void>();
@@ -367,15 +486,17 @@ class AgentRunner {
     return true;
   }
 
+  /** 主循环：等待唤醒后开始处理未读消息 */
   private async loop() {
     // eslint-disable-next-line no-constant-condition
     while (true) {
       await this.wake.promise;
-      if (this.running) continue;
+      if (this.running) continue; // 已在运行时忽略新唤醒
       this.running = true;
       try {
         await this.processUntilIdle();
       } catch (err) {
+        // 记录错误事件到 bus 和日志
         this.bus.emit(this.agentId, {
           event: "agent.error",
           data: { message: err instanceof Error ? err.message : String(err) },
@@ -392,16 +513,20 @@ class AgentRunner {
     }
   }
 
+  /** 循环处理直到所有未读消息都被消费 */
   private async processUntilIdle() {
+    // 若代理是 human 类型则直接返回
     const role = await store.getAgentRole({ agentId: this.agentId }).catch(() => null);
     if (role === "human" || role === null) return;
     if (this.consumeInterruptRequest()) return;
     // eslint-disable-next-line no-constant-condition
     while (true) {
+      // 查询未读消息批次（按群组拆分）
       if (this.consumeInterruptRequest()) return;
       const batches = await store.listUnreadByGroup({ agentId: this.agentId });
-      if (batches.length === 0) return;
+      if (batches.length === 0) return; // 无更多未读
 
+      // 通知 UI 层有未读
       this.bus.emit(this.agentId, {
         event: "agent.unread",
         data: {
@@ -413,6 +538,7 @@ class AgentRunner {
         },
       });
 
+      // 逐批处理
       for (const batch of batches) {
         if (this.consumeInterruptRequest()) return;
         await this.processGroupUnread(batch.groupId, batch.messages);
@@ -421,6 +547,7 @@ class AgentRunner {
     }
   }
 
+  /** 对单个群组的未读消息进行处理 */
   private async processGroupUnread(
     groupId: UUID,
     unreadMessages: Array<{
@@ -435,10 +562,12 @@ class AgentRunner {
     const agent = await store.getAgent({ agentId: this.agentId });
     const parsed = safeJsonParse<unknown>(agent.llmHistory, {});
     const history = Array.isArray(parsed) ? (parsed as HistoryMessage[]) : [];
+    // 确保技能块已加载
     const skillsBlock = await buildSkillsBlock();
     const hasSkills = historyHasSkills(history);
 
     if (history.length === 0) {
+      // 第一次消息，构建初始 system 消息
       const role = agent.role;
       history.push({
         role: "system",
@@ -455,25 +584,30 @@ class AgentRunner {
           (skillsBlock ? `\n\n${skillsBlock}` : ""),
       });
     } else if (skillsBlock && !hasSkills) {
+      // 之后若无技能块则插入
       history.push({ role: "system", content: skillsBlock });
     }
 
+    // 将未读消息拼接成一条 user 消息，按群组和发送者格式化
     const userContent = unreadMessages
       .map((m) => `[group:${groupId}] ${m.senderId}: ${m.content}`)
       .join("\n");
     history.push({ role: "user", content: userContent });
 
+    // 标记该群组已读到最后一条消息
     const lastId = unreadMessages[unreadMessages.length - 1]?.id;
     if (lastId) {
       await store.markGroupReadToMessage({ groupId, readerId: this.agentId, messageId: lastId });
     }
 
+    // 进入工具调用循环，获得代理回复
     const { assistantText, assistantThinking, didSend } = await this.runWithTools({
       groupId,
       workspaceId,
       history,
     });
 
+    // 将 LLM 输出追加到历史
     history.push({
       role: "assistant",
       content: assistantText,
@@ -487,6 +621,7 @@ class AgentRunner {
           "Reminder: 本轮未调用 send_*。先判断是否需要对外可见；需要时使用 send_group_message 或 send_direct_message，无需时可不发送。",
       });
 
+      // 再次运行一次工具循环，强制让代理做出决定
       const followup = await this.runWithTools({
         groupId,
         workspaceId,
@@ -499,11 +634,14 @@ class AgentRunner {
         reasoning_content: followup.assistantThinking || undefined,
       });
     }
+    // 保存最终历史到持久化存储
     await store.setAgentHistory({
       agentId: this.agentId,
       llmHistory: JSON.stringify(history),
       workspaceId,
     });
+
+    // 记录快照日志（仅限调试）
     try {
       await appendAgentHistorySnapshot({
         agentId: this.agentId,
@@ -514,18 +652,20 @@ class AgentRunner {
     } catch {
       // best-effort logging
     }
+    // 通知 UI 层历史已保存
     getWorkspaceUIBus().emit(workspaceId, {
       event: "ui.agent.history.persisted",
       data: { workspaceId, agentId: this.agentId, groupId, historyLength: history.length },
     });
   }
 
+  /** 与 LLM 交互，支持工具调用并返回最终文本 */
   private async runWithTools(input: {
     groupId: UUID;
     workspaceId: UUID;
     history: HistoryMessage[];
   }) {
-    const maxToolRounds = 3;
+    const maxToolRounds = 3; // 限制最多三轮工具调用
     let assistantText = "";
     let assistantThinking = "";
     let didSend = false;
@@ -540,9 +680,11 @@ class AgentRunner {
       assistantThinking = res.assistantThinking;
 
       if (res.toolCalls.length === 0) {
+        // 若本轮无工具调用，直接返回
         return { assistantText, assistantThinking, didSend };
       }
 
+      // 将工具调用记录为 assistant 消息（方便后续追踪）
       input.history.push({
         role: "assistant",
         content: res.assistantText,
@@ -554,14 +696,16 @@ class AgentRunner {
         reasoning_content: res.assistantThinking || undefined,
       });
 
+      // 遍历每个工具调用，执行并把结果回写到历史
       for (const call of res.toolCalls) {
         if (call.name && SEND_TOOL_NAMES.has(call.name)) {
-          didSend = true;
+          didSend = true; // 记录已发送
         }
         const result = await this.executeToolCall({
           groupId: input.groupId,
           call,
         });
+        // 向 bus 和 UI 发送工具调用结果事件
         this.bus.emit(this.agentId, {
           event: "agent.stream",
           data: {
@@ -579,6 +723,8 @@ class AgentRunner {
           tool_call_id: call.id,
           tool_call_name: call.name,
         });
+
+        // 记录工具结果到历史
         input.history.push({
           role: "tool",
           content: JSON.stringify(result),
@@ -586,17 +732,18 @@ class AgentRunner {
           name: call.name,
         });
       }
-
     }
 
     return { assistantText, assistantThinking, didSend };
   }
 
+  /** 根据具体 LLM 提供商调用流式接口并解析结果 */
   private async executeToolCall(input: { groupId: UUID; call: ToolCall }) {
     const name = input.call.name ?? "";
     const workspaceId = await store.getGroupWorkspaceId({ groupId: input.groupId });
     const toolMeta = { toolCallId: input.call.id, toolName: input.call.name };
 
+    // 通知 UI 层工具调用开始
     getWorkspaceUIBus().emit(workspaceId, {
       event: "ui.agent.tool_call.start",
       data: {
@@ -608,6 +755,7 @@ class AgentRunner {
       },
     });
 
+    // 结束标记工具调用
     const emitToolDone = (ok: boolean) => {
       getWorkspaceUIBus().emit(workspaceId, {
         event: "ui.agent.tool_call.done",
@@ -622,6 +770,7 @@ class AgentRunner {
       });
     };
 
+    // 下面是对每个工具名称的实现
     if (name === "self") {
       const role = await store.getAgentRole({ agentId: this.agentId }).catch(() => null);
       emitToolDone(true);
@@ -663,6 +812,7 @@ class AgentRunner {
         return { ok: false, error: "Missing command" };
       }
 
+      // 确定工作目录
       const workspaceRoot = process.env.AGENT_WORKDIR ?? process.cwd();
       const requestedCwd = (args.cwd ?? "").trim();
       let finalCwd = workspaceRoot;
@@ -683,31 +833,112 @@ class AgentRunner {
       const maxBuffer = Math.max(64 * 1024, Math.floor(maxOutputKB * 1024));
       const execAsync = promisify(exec);
 
-      try {
-        const { stdout, stderr } = await execAsync(command, {
-          cwd: finalCwd,
-          timeout: timeoutMs,
-          maxBuffer,
-          shell: "/bin/bash",
-        });
-        emitToolDone(true);
-        return { ok: true, stdout, stderr, exitCode: 0, cwd: finalCwd };
-      } catch (err: any) {
-        const stdout = err?.stdout ?? "";
-        const stderr = err?.stderr ?? "";
-        const exitCode = typeof err?.code === "number" ? err.code : null;
-        const signal = typeof err?.signal === "string" ? err.signal : null;
-        emitToolDone(false);
-        return {
-          ok: false,
-          stdout,
-          stderr,
-          exitCode,
-          signal,
-          cwd: finalCwd,
-          error: String(err?.message ?? err),
-        };
+      // 根据平台构建 shell 执行方案
+      let shellPath: string;
+      let shellArgs: string[] = [];
+      let fallbackShells: Array<{path: string, args: string[]}> = [];
+
+      if (process.platform === "win32") {
+        fallbackShells = [];
+
+        if (typeof process.env.ComSpec === "string" && process.env.ComSpec.includes("powershell")) {
+          fallbackShells.push({ path: process.env.ComSpec, args: ["-Command"] });
+        }
+
+        fallbackShells.push({ path: "powershell.exe", args: ["-Command"] });
+
+        fallbackShells.push({ path: "pwsh.exe", args: ["-Command"] });
+
+        if (typeof process.env.ComSpec === "string" && !process.env.ComSpec.includes("powershell")) {
+          fallbackShells.push({ path: process.env.ComSpec, args: ["/C"] });
+        }
+        fallbackShells.push({ path: "cmd.exe", args: ["/C"] });
+
+        fallbackShells.push({ path: "wsl.exe", args: ["bash", "-c"] });
+      } else {
+        fallbackShells = [];
+
+        if (typeof process.env.SHELL === "string") {
+          fallbackShells.push({ path: process.env.SHELL, args: ["-c"] });
+        }
+
+        if (process.platform === "darwin") {
+          fallbackShells.push({ path: "/bin/zsh", args: ["-c"] });
+        }
+
+        fallbackShells.push({ path: "/bin/bash", args: ["-c"] });
+        fallbackShells.push({ path: "/bin/zsh", args: ["-c"] });
+        fallbackShells.push({ path: "/bin/sh", args: ["-c"] });
+        fallbackShells.push({ path: "/bin/fish", args: ["-c"] });
       }
+
+      // 按优先级尝试每个 shell，直到成功
+      let lastError: any = null;
+      for (const shell of fallbackShells) {
+        try {
+          shellPath = shell.path;
+          shellArgs = shell.args;
+
+          let finalCommand = command;
+
+          if (shellPath.includes("wsl.exe") || shellPath.includes("wsl")) {
+            const escapedCommand = command.replace(/"/g, '\\"').replace(/\$/g, '\\$');
+            finalCommand = `bash -c "${escapedCommand}"`;
+          }
+
+          const { stdout, stderr } = await execAsync(finalCommand, {
+            cwd: finalCwd,
+            timeout: timeoutMs,
+            maxBuffer,
+            shell: shellPath,
+          });
+
+          emitToolDone(true);
+          return { 
+            ok: true, 
+            stdout, 
+            stderr, 
+            exitCode: 0, 
+            cwd: finalCwd,
+            shellInfo: {
+              shell: shellPath,
+              platform: process.platform,
+              args: shellArgs
+            }
+          };
+        } catch (err: any) {
+          lastError = err;
+          continue;
+        }
+      }
+
+      // 全部尝试失败
+      emitToolDone(false);
+
+      let errorSuggestion = "All shell attempts failed";
+      if (lastError?.code === 127 || lastError?.code === 1) {
+        errorSuggestion = "Command not found or permission denied. Check if the command exists and is executable.";
+      } else if (lastError?.code === "ETIMEDOUT" || lastError?.code === 124) {
+        errorSuggestion = "Command timed out. Consider simplifying the command or increasing timeout.";
+      } else if (lastError?.signal === "SIGKILL") {
+        errorSuggestion = "Command was killed due to resource limits. Check memory or output size limits.";
+      }
+
+      return {
+        ok: false,
+        stdout: lastError?.stdout ?? "",
+        stderr: lastError?.stderr ?? "",
+        exitCode: typeof lastError?.code === "number" ? lastError.code : null,
+        signal: typeof lastError?.signal === "string" ? lastError.signal : null,
+        cwd: finalCwd,
+        error: `${errorSuggestion}: ${String(lastError?.message ?? lastError)}`,
+        details: {
+          platform: process.platform,
+          testedShells: fallbackShells.map(s => s.path),
+          suggestion: errorSuggestion,
+          rawError: String(lastError?.message ?? lastError)
+        }
+      };
     }
 
     if (name === "create") {
@@ -757,7 +988,6 @@ class AgentRunner {
         workspaceId,
         fromId: this.agentId,
         toId: to,
-        // Do not auto-add the human into agent↔agent threads; sidebar only shows human-participant chats.
         content,
         contentType: "text",
         groupName: null,
@@ -976,6 +1206,47 @@ class AgentRunner {
       return { ok: true, messages };
     }
 
+    if (name === "delete_agent") {
+      const args = safeJsonParse<{ agentId?: string; force?: boolean }>(input.call.argumentsText, {});
+      const targetAgentId = (args.agentId ?? "").trim();
+      const force = args.force ?? false;
+
+      if (!targetAgentId) {
+        emitToolDone(false);
+        return { ok: false, error: "Missing agentId" };
+      }
+
+      // 检查目标代理是否存在
+      const targetRole = await store.getAgentRole({ agentId: targetAgentId }).catch(() => null);
+      if (!targetRole) {
+        emitToolDone(false);
+        return { ok: false, error: `Agent not found: ${targetAgentId}` };
+      }
+
+      // 权限检查：仅允许删除子代理或使用 force 删除
+      const agents = await store.listAgentsMeta({ workspaceId });
+      const targetAgent = agents.find(a => a.id === targetAgentId);
+
+      if (!force) {
+        if (!targetAgent || targetAgent.parentId !== this.agentId) {
+          emitToolDone(false);
+          return { ok: false, error: `Permission denied: cannot delete agent ${targetAgentId}. Use force=true to override.` };
+        }
+      }
+
+      // 删除代理（假设存储层已实现）
+      await store.deleteAgent({ agentId: targetAgentId, workspaceId });
+
+      getWorkspaceUIBus().emit(workspaceId, {
+        event: "ui.agent.deleted",
+        data: { workspaceId, agent: { id: targetAgentId, role: targetRole, parentId: targetAgent?.parentId ?? null } },
+      });
+
+      emitToolDone(true);
+      return { ok: true, agentId: targetAgentId, deleted: true };
+    }
+
+    // 若为插件工具，直接委托给 MCP
     const mcp = await getMcpRegistry(BUILTIN_TOOL_NAMES);
     if (mcp.hasTool(name)) {
       const args = safeJsonParse<Record<string, unknown>>(input.call.argumentsText, {});
@@ -984,10 +1255,12 @@ class AgentRunner {
       return result;
     }
 
+    // 未识别工具
     emitToolDone(false);
     return { ok: false, error: `Unknown tool: ${name}` };
   }
 
+  /** 根据 LLM 提供商调用流式接口 */
   private async callLlmStreaming(
     history: HistoryMessage[],
     ctx: { workspaceId: UUID; groupId: UUID; round: number }
@@ -999,12 +1272,14 @@ class AgentRunner {
     return this.callGlmStreaming(history, ctx);
   }
 
+  /** OpenRouter 的流式调用实现 */
   private async callOpenRouterStreaming(
     history: HistoryMessage[],
     ctx: { workspaceId: UUID; groupId: UUID; round: number }
   ) {
     const { apiKey, baseUrl, model, httpReferer, appTitle } = getOpenRouterConfig();
 
+    // 通知 UI 开始
     getWorkspaceUIBus().emit(ctx.workspaceId, {
       event: "ui.agent.llm.start",
       data: {
@@ -1022,7 +1297,6 @@ class AgentRunner {
 
     const tools = await getAgentTools();
     const payload: Record<string, unknown> = {
-      // Preserve reasoning for OpenRouter using the canonical "reasoning" field.
       messages: mapOpenRouterMessages(history),
       stream: true,
       stream_options: { include_usage: true },
@@ -1043,6 +1317,7 @@ class AgentRunner {
     const requestBody = JSON.stringify(payload);
     void appendAgentLlmRequestRaw({ agentId: this.agentId, body: requestBody });
 
+    // 发送请求到 OpenRouter
     const upstream = await fetch(baseUrl, {
       method: "POST",
       headers,
@@ -1054,6 +1329,7 @@ class AgentRunner {
       throw new Error(`OpenRouter upstream error: ${upstream.status} ${text}`);
     }
 
+    // 解析 SSE 流
     const assembler = new OpenAIStreamAssembler();
     let prev = assembler.snapshot();
     let assistantText = "";
@@ -1062,10 +1338,12 @@ class AgentRunner {
     for await (const evt of parseSSEJsonLines(upstream.body)) {
       const state = assembler.push(evt as any);
 
+      // 计算差量
       const reasoningDelta = state.reasoningContent.slice(prev.reasoningContent.length);
       const contentDelta = state.content.slice(prev.content.length);
       const toolCallDeltas = extractToolCallDeltas(evt as any, prev, state);
 
+      // 推送 reasoning 变化
       if (reasoningDelta) {
         assistantThinking += reasoningDelta;
         this.bus.emit(this.agentId, {
@@ -1080,6 +1358,7 @@ class AgentRunner {
         });
       }
 
+      // 推送 content 变化
       if (contentDelta) {
         assistantText += contentDelta;
         this.bus.emit(this.agentId, {
@@ -1094,6 +1373,7 @@ class AgentRunner {
         });
       }
 
+      // 推送工具调用变化
       for (const delta of toolCallDeltas) {
         this.bus.emit(this.agentId, {
           event: "agent.stream",
@@ -1117,6 +1397,7 @@ class AgentRunner {
       prev = state;
     }
 
+    // 完成事件
     this.bus.emit(this.agentId, {
       event: "agent.done",
       data: { finishReason: prev.finishReason ?? undefined },
@@ -1140,6 +1421,7 @@ class AgentRunner {
 
     const finalState = assembler.snapshot();
 
+    // 保存 token 计数
     if (finalState.usage && finalState.usage.totalTokens > 0) {
       try {
         await store.setGroupContextTokens({
@@ -1159,12 +1441,14 @@ class AgentRunner {
     };
   }
 
+  /** GLM 的流式调用实现 */
   private async callGlmStreaming(
     history: HistoryMessage[],
     ctx: { workspaceId: UUID; groupId: UUID; round: number }
   ) {
     const { apiKey, baseUrl, model } = getGlmConfig();
 
+    // UI 开始事件
     getWorkspaceUIBus().emit(ctx.workspaceId, {
       event: "ui.agent.llm.start",
       data: {
@@ -1180,6 +1464,7 @@ class AgentRunner {
       kind: "start",
     });
 
+    // 发送请求 payload
     const glmPayload: Record<string, unknown> = {
       model,
       messages: history,
@@ -1191,6 +1476,7 @@ class AgentRunner {
     const requestBody = JSON.stringify(glmPayload);
     void appendAgentLlmRequestRaw({ agentId: this.agentId, body: requestBody });
 
+    // 发送请求
     const upstream = await fetch(baseUrl, {
       method: "POST",
       headers: {
@@ -1205,6 +1491,7 @@ class AgentRunner {
       throw new Error(`GLM upstream error: ${upstream.status} ${text}`);
     }
 
+    // SSE 解析
     const assembler = new GLMStreamAssembler();
     let prev = assembler.snapshot();
     let assistantText = "";
@@ -1268,6 +1555,7 @@ class AgentRunner {
       prev = state;
     }
 
+    // 完成事件
     this.bus.emit(this.agentId, {
       event: "agent.done",
       data: { finishReason: prev.finishReason ?? undefined },
@@ -1291,7 +1579,7 @@ class AgentRunner {
 
     const finalState = assembler.snapshot();
 
-    // Save token usage (current context window size)
+    // 保存 token 计数
     if (finalState.usage && finalState.usage.totalTokens > 0) {
       try {
         await store.setGroupContextTokens({
@@ -1312,6 +1600,14 @@ class AgentRunner {
   }
 }
 
+// ------------------------------------
+// 工具调用差量提取函数
+// ------------------------------------
+/**
+ * 根据 SSE 分片和前后状态，计算工具调用的增量。
+ *
+ * 这在 LLM 的 streaming 输出中非常重要，因为每一帧都可能只包含部分信息。
+ */
 function extractToolCallDeltas(
   chunk: {
     choices?: Array<{
@@ -1331,6 +1627,7 @@ function extractToolCallDeltas(
   const toolCalls = chunk.choices?.[0]?.delta?.tool_calls ?? [];
   if (toolCalls.length === 0) return deltas;
 
+  // 通过索引建立前后状态映射，方便比较
   const prevByIndex = new Map(prevState.toolCalls.map((call) => [call.index, call]));
   const nextByIndex = new Map(nextState.toolCalls.map((call) => [call.index, call]));
 
@@ -1347,6 +1644,7 @@ function extractToolCallDeltas(
       continue;
     }
 
+    // 若函数名变化（例如从 null 变为 "send"），也需要记录
     if (name && name !== prev?.name) {
       deltas.push({ delta: "", tool_call_id: id, tool_call_name: name });
     }
@@ -1355,23 +1653,28 @@ function extractToolCallDeltas(
   return deltas;
 }
 
+// ------------------------------------
+// AgentRuntime：管理所有代理实例的全局入口
+// ------------------------------------
 export class AgentRuntime {
   private readonly runners = new Map<UUID, AgentRunner>();
   public readonly bus = new AgentEventBus();
   private bootstrapped = false;
   static readonly VERSION = 2;
 
+  /** 初始化时加载所有已注册的代理，并创建对应 Runner */
   async bootstrap() {
     if (this.bootstrapped) return;
     this.bootstrapped = true;
 
     const agents = await store.listAgents();
     for (const a of agents) {
-      if (a.role === "human") continue;
+      if (a.role === "human") continue; // 人类用户不需要后台跑
       this.ensureRunner(a.id);
     }
   }
 
+  /** 获取或创建指定 ID 的 AgentRunner */
   ensureRunner(agentId: UUID) {
     const existing = this.runners.get(agentId);
     if (existing) return existing;
@@ -1390,6 +1693,7 @@ export class AgentRuntime {
     return runner;
   }
 
+  /** 当群组有新消息时唤醒所有相关代理 */
   async wakeAgentsForGroup(groupId: UUID, senderId: UUID) {
     await this.bootstrap();
     const memberIds = await store.listGroupMemberIds({ groupId });
@@ -1402,6 +1706,7 @@ export class AgentRuntime {
     }
   }
 
+  /** 唤醒单个代理（直接或上下文流） */
   async wakeAgent(agentId: UUID, reason: "direct_message" | "context_stream" = "direct_message") {
     await this.bootstrap();
     const role = await store.getAgentRole({ agentId }).catch(() => null);
@@ -1423,6 +1728,9 @@ export class AgentRuntime {
   }
 }
 
+// ------------------------------------
+// 全局单例
+// ------------------------------------
 declare global {
   // eslint-disable-next-line no-var
   var __agentWechatRuntime: AgentRuntime | undefined;

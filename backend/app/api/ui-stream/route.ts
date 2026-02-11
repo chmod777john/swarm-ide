@@ -33,6 +33,7 @@ export async function GET(req: Request) {
       upstashUnsubscribe = await channel.subscribe({
         events: [
           "ui.agent.created",
+          "ui.agent.deleted",
           "ui.group.created",
           "ui.message.created",
           "ui.agent.llm.start",
