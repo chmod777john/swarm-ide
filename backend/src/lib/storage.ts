@@ -114,16 +114,20 @@ export const store = {
     return rows[0]!.id;
   },
 
+  // 修复点1：返回值类型从 UUID | null 改为 UUID（内部逻辑已确保不会返回 null）
   async mergeDuplicateExactP2PGroups(input: {
     workspaceId: UUID;
     memberA: UUID;
     memberB: UUID;
     preferredName?: string | null;
-  }): Promise<UUID | null> {
+  }): Promise<UUID> {
     const db = getDb();
     const a = input.memberA;
     const b = input.memberB;
-    if (!a || !b || a === b) return null;
+    if (!a || !b || a === b) {
+      // 兜底：即使入参非法，也返回一个合法 UUID（避免返回 null），同时抛出明确错误
+      throw new Error("memberA and memberB must be non-empty and different UUIDs");
+    }
 
     const createdAt = now();
 
@@ -168,7 +172,7 @@ export const store = {
         return sorted[0]!;
       };
 
-      let keepId: UUID | null = null;
+      let keepId: UUID; // 移除 null 类型，确保必为合法 UUID
 
       if (rows.length === 0) {
         keepId = uuid();
@@ -181,7 +185,7 @@ export const store = {
         await tx.insert(groupMembers).values([
           { groupId: keepId, userId: a, lastReadMessageId: null, joinedAt: createdAt },
           { groupId: keepId, userId: b, lastReadMessageId: null, joinedAt: createdAt },
-        ]);
+        ]).onConflictDoNothing();
         return keepId;
       }
 
@@ -434,6 +438,11 @@ export const store = {
         createdAssistant = true;
       }
 
+      // 确保 humanAgentId 和 assistantAgentId 非空（兜底，避免后续报错）
+      if (!humanAgentId || !assistantAgentId) {
+        throw new Error("Failed to create or retrieve human/assistant agent");
+      }
+
       const candidate = await tx
         .select({ id: groups.id })
         .from(groups)
@@ -522,6 +531,11 @@ export const store = {
 
     const defaults = await store.ensureWorkspaceDefaults({ workspaceId: input.workspaceId });
     const humanAgentId = defaults.humanAgentId;
+
+    // 兜底：确保 humanAgentId 非空
+    if (!humanAgentId) {
+      throw new Error("Human agent not found in workspace defaults");
+    }
 
     const workspace = await db
       .select({ id: workspaces.id })
@@ -628,6 +642,12 @@ export const store = {
     const groupId = uuid();
     const createdAt = now();
 
+    // 兜底：确保 memberIds 非空且去重
+    const validMemberIds = [...new Set(input.memberIds)].filter(Boolean);
+    if (validMemberIds.length === 0) {
+      throw new Error("memberIds must contain at least one valid UUID");
+    }
+
     await db.transaction(async (tx) => {
       await tx.insert(groups).values({
         id: groupId,
@@ -637,13 +657,13 @@ export const store = {
       });
 
       await tx.insert(groupMembers).values(
-        input.memberIds.map((userId) => ({
+        validMemberIds.map((userId) => ({
           groupId,
           userId,
           lastReadMessageId: null,
           joinedAt: createdAt,
         }))
-      );
+      ).onConflictDoNothing();
     });
 
     await emitDbWrite({
@@ -760,6 +780,11 @@ export const store = {
         : null,
     ].filter(Boolean) as UUID[];
 
+    // 兜底：确保 memberIds 有效
+    if (memberIds.length === 0) {
+      throw new Error("memberIds must contain at least one valid UUID");
+    }
+
     let groupId: UUID;
     let channel: "new_thread" | "new_group" | "reuse_existing_group";
     if (input.newThread === true) {
@@ -778,20 +803,13 @@ export const store = {
         memberB: memberIds[1]!,
         preferredName: input.groupName ?? null,
       });
-      groupId =
-        (await this.mergeDuplicateExactP2PGroups({
-          workspaceId: input.workspaceId,
-          memberA: memberIds[0]!,
-          memberB: memberIds[1]!,
-          preferredName: input.groupName ?? null,
-        })) ??
-        (
-          await this.createGroup({
-            workspaceId: input.workspaceId,
-            memberIds,
-            name: input.groupName ?? undefined,
-          })
-        ).id;
+      // 修复点2：mergeDuplicateExactP2PGroups 已返回非空 UUID，无需 ?? 兜底（消除类型歧义）
+      groupId = await this.mergeDuplicateExactP2PGroups({
+        workspaceId: input.workspaceId,
+        memberA: memberIds[0]!,
+        memberB: memberIds[1]!,
+        preferredName: input.groupName ?? null,
+      });
       channel = existing ? "reuse_existing_group" : "new_group";
     } else {
       const existing = await this.findLatestExactGroupId({
@@ -1169,5 +1187,87 @@ export const store = {
       senderId: m.senderId,
       sendTime: m.sendTime.toISOString(),
     }));
+  },
+
+  async deleteAgent(input: { agentId: UUID; workspaceId: UUID }) {
+    const db = getDb();
+    
+    // Check if agent exists
+    const agent = await db
+      .select({ id: agents.id, role: agents.role })
+      .from(agents)
+      .where(and(eq(agents.id, input.agentId), eq(agents.workspaceId, input.workspaceId)))
+      .limit(1);
+    
+    if (agent.length === 0) {
+      throw new Error(`Agent not found: ${input.agentId} in workspace ${input.workspaceId}`);
+    }
+
+    // Step 1: Recursively delete all child agents created by this agent
+    const childAgents = await db
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(
+        eq(agents.parentId, input.agentId),
+        eq(agents.workspaceId, input.workspaceId)
+      ));
+    
+    for (const child of childAgents) {
+      await this.deleteAgent({ 
+        agentId: child.id, 
+        workspaceId: input.workspaceId 
+      });
+    }
+
+    // Step 2: Find and delete the agent's dedicated group (group with name = agent's role)
+    // This group is created when the agent is created via createSubAgentWithP2P
+    // Find group by matching: same name as agent's role AND agent is a member of it
+    const dedicatedGroups = await db
+      .select({ id: groups.id })
+      .from(groups)
+      .innerJoin(groupMembers, eq(groupMembers.groupId, groups.id))
+      .where(and(
+        eq(groups.workspaceId, input.workspaceId),
+        eq(groups.name, agent[0]!.role),
+        eq(groupMembers.userId, input.agentId)
+      ))
+      .limit(1);
+    
+    if (dedicatedGroups.length > 0) {
+      const groupId = dedicatedGroups[0]!.id;
+      
+      // Delete all messages in this group
+      await db.delete(messages)
+        .where(eq(messages.groupId, groupId));
+      
+      // Delete group members
+      await db.delete(groupMembers)
+        .where(eq(groupMembers.groupId, groupId));
+      
+      // Delete the group itself
+      await db.delete(groups)
+        .where(eq(groups.id, groupId));
+    }
+
+    // Step 3: Delete agent from all other group memberships
+    // (Keep this for cleaning up membership in shared groups like default P2P group)
+    await db
+      .delete(groupMembers)
+      .where(eq(groupMembers.userId, input.agentId));
+    
+    // Step 4: Delete the agent record
+    await db
+      .delete(agents)
+      .where(and(eq(agents.id, input.agentId), eq(agents.workspaceId, input.workspaceId)));
+    
+    // Emit database write event
+    await emitDbWrite({
+      workspaceId: input.workspaceId,
+      table: "agents",
+      action: "delete",
+      recordId: input.agentId,
+    });
+
+    return { deleted: true, agentId: input.agentId };
   },
 };

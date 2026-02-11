@@ -1164,6 +1164,31 @@ function IMPageInner() {
               [agentId]: payload.event === "ui.agent.tool_call.start" ? "BUSY" : "IDLE",
             }));
           }
+        } else if (payload.event === "ui.agent.deleted") {
+          const agentId = payload.data?.agent?.id as UUID | undefined;
+          const role = payload.data?.agent?.role ?? "agent";
+          
+          // 直接从本地状态中移除已删除的代理，避免 UI 延迟
+          if (agentId) {
+            setAgents((prev) => prev.filter((a) => a.id !== agentId));
+            setAgentStatusById((prev) => {
+              const next = { ...prev };
+              delete next[agentId];
+              return next;
+            });
+            // 清理相关状态，防止内存泄漏
+            setNodeOffsets((prev) => {
+              const next = { ...prev };
+              delete next[agentId];
+              return next;
+            });
+            setCollapsedAgents((prev) => {
+              const next = { ...prev };
+              delete next[agentId];
+              return next;
+            });
+          }
+          pushVizEvent(payload, `删除 ${role}`, "agent");
         } else if (payload.event === "ui.agent.interrupt_all") {
           pushVizEvent(payload, "停止全部 Agent", "agent");
           const ids = Array.isArray(payload.data?.agentIds)
@@ -1171,7 +1196,9 @@ function IMPageInner() {
             : [];
           setAgentStatusById((prev) => {
             const next = { ...prev };
-            const targetIds = ids.length > 0 ? ids : Object.keys(next);
+            const targetIds = ids.length > 0 
+              ? ids.filter(id => next[id] !== undefined)
+              : Object.keys(next);
             for (const id of targetIds) {
               next[id] = "IDLE";
             }
@@ -1528,12 +1555,20 @@ function IMPageInner() {
     const prefixWidth = depth > 0 ? depth * guideWidth + guideWidth : 0;
     const previewIndent = tree ? prefixWidth + caretWidth + caretGap : 0;
     return (
-      <button
+      <div
         key={g.id}
         className={cx("row", g.id === activeGroupId && "active")}
         onClick={() => {
           setActiveGroupId(g.id);
         }}
+        onKeyPress={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setActiveGroupId(g.id);
+          }
+        }}
+        role="button"
+        tabIndex={0}
         style={{ paddingLeft: 16 }}
       >
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
@@ -1608,7 +1643,7 @@ function IMPageInner() {
             </div>
           </div>
         )}
-      </button>
+      </div>
     );
   };
 
