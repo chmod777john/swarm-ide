@@ -56,7 +56,7 @@ https://zhuanlan.zhihu.com/p/2000736341479138182
 
 ### 方式二：本地运行
 ```
-cd agent-wechat
+cd swarm-ide
 cd backend
 
 cp .env.example .env.local
