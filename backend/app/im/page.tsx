@@ -1458,17 +1458,28 @@ function IMPageInner() {
   );
 
   const summarizeHistoryEntry = useCallback((entry: any, index: number, opts?: { omitRole?: boolean }) => {
-    const role = typeof entry?.role === "string" ? entry.role : "unknown";
+    const role =
+      typeof entry?.role === "string"
+        ? entry.role
+        : typeof entry?.type === "string"
+          ? entry.type
+          : "unknown";
     const toolCalls = Array.isArray(entry?.tool_calls) ? entry.tool_calls.length : 0;
     const toolName =
       typeof entry?.name === "string"
         ? entry.name
+        : typeof entry?.call_id === "string"
+          ? entry.call_id.slice(0, 12)
         : typeof entry?.tool_call_id === "string"
           ? entry.tool_call_id.slice(0, 6)
           : "";
     let contentText = "";
     if (typeof entry?.content === "string") {
       contentText = entry.content;
+    } else if (typeof entry?.output === "string") {
+      contentText = entry.output;
+    } else if (typeof entry?.arguments === "string") {
+      contentText = entry.arguments;
     } else if (entry?.content != null) {
       try {
         contentText = JSON.stringify(entry.content);
@@ -1479,7 +1490,10 @@ function IMPageInner() {
     contentText = contentText.replace(/\s+/g, " ").slice(0, 80);
     const metaParts: string[] = [];
     if (!opts?.omitRole) metaParts.push(role);
-    if (role === "tool" && toolName) {
+    if (
+      (role === "tool" || role === "function_call" || role === "function_call_output") &&
+      toolName
+    ) {
       metaParts.push(toolName);
     } else if (toolCalls > 0) {
       metaParts.push(`tool_calls:${toolCalls}`);
@@ -1490,7 +1504,9 @@ function IMPageInner() {
   }, []);
 
   const historyRole = useCallback((entry: any) => {
-    return typeof entry?.role === "string" ? entry.role : "unknown";
+    if (typeof entry?.role === "string") return entry.role;
+    if (typeof entry?.type === "string") return entry.type;
+    return "unknown";
   }, []);
 
   const historyAccent = useCallback((role?: string) => {
@@ -1500,6 +1516,10 @@ function IMPageInner() {
     if (role === "productmanager") return "#fb7185";
     if (role === "coder") return "#34d399";
     if (role === "tool") return "#fbbf24";
+    if (role === "function_call") return "#fbbf24";
+    if (role === "function_call_output") return "#f59e0b";
+    if (role === "reasoning") return "#22d3ee";
+    if (role === "message") return "#38bdf8";
     if (role === "system") return "#a78bfa";
     return "#94a3b8";
   }, []);

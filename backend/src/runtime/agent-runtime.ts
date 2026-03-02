@@ -1,6 +1,11 @@
 import { store } from "@/lib/storage";
-import { GLMStreamAssembler, parseSSEJsonLines } from "@/lib/glm-stream";
-import { OpenAIStreamAssembler } from "@/lib/openai-stream";
+import { parseSSEJsonLines } from "@/llm/core/sse";
+import type { CanonicalReasoningDetail } from "@/llm/core/types";
+import { createLlmStreamAdapter } from "@/llm/providers";
+import {
+  mapToOpenRouterResponsesTools,
+  normalizeOpenRouterResponsesUrl,
+} from "@/llm/providers/openrouter-responses";
 
 import { AgentEventBus } from "./event-bus";
 import { createDeferred, safeJsonParse } from "./utils";
@@ -14,14 +19,7 @@ import path from "node:path";
 
 type UUID = string;
 
-type HistoryMessage =
-  | {
-      role: "system" | "user" | "assistant";
-      content: string;
-      tool_calls?: unknown;
-      reasoning_content?: string;
-    }
-  | { role: "tool"; content: string; tool_call_id?: string; name?: string };
+type OpenRouterInputItem = Record<string, unknown>;
 
 type ToolCall = {
   index: number;
@@ -32,6 +30,90 @@ type ToolCall = {
 
 const SKILLS_MARKER = "[skills:loaded]";
 const SEND_TOOL_NAMES = new Set(["send", "send_group_message", "send_direct_message"]);
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object") return null;
+  return value as Record<string, unknown>;
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+function textFromContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  const parts: string[] = [];
+  for (const part of content) {
+    const record = asRecord(part);
+    if (!record) continue;
+    const text = readString(record.text);
+    if (text) parts.push(text);
+  }
+  return parts.join("");
+}
+
+function cloneReasoningDetail(detail: CanonicalReasoningDetail): OpenRouterInputItem {
+  if (typeof structuredClone === "function") {
+    return structuredClone(detail) as OpenRouterInputItem;
+  }
+  return JSON.parse(JSON.stringify(detail)) as OpenRouterInputItem;
+}
+
+function buildReasoningHistoryItems(input: {
+  assistantThinking: string;
+  reasoningDetails: unknown[];
+}): OpenRouterInputItem[] {
+  const details = input.reasoningDetails
+    .map((detail) =>
+      asRecord(detail) ? cloneReasoningDetail(detail as CanonicalReasoningDetail) : null
+    )
+    .filter((detail): detail is OpenRouterInputItem => Boolean(detail));
+
+  if (details.length > 0) {
+    return details;
+  }
+
+  const thinking = input.assistantThinking.trim();
+  if (!thinking) return [];
+  return [
+    {
+      type: "reasoning",
+      id: `reasoning_${Date.now()}`,
+      status: "completed",
+      summary: [{ type: "summary_text", text: thinking }],
+      content: [{ type: "reasoning_text", text: thinking }],
+    },
+  ];
+}
+
+function buildAssistantTurnHistoryItems(input: {
+  assistantText: string;
+  assistantThinking: string;
+  reasoningDetails: unknown[];
+}): OpenRouterInputItem[] {
+  const items: OpenRouterInputItem[] = [];
+  if (input.assistantText.trim()) {
+    items.push({
+      role: "assistant",
+      content: input.assistantText,
+    });
+  }
+  items.push(
+    ...buildReasoningHistoryItems({
+      assistantThinking: input.assistantThinking,
+      reasoningDetails: input.reasoningDetails,
+    })
+  );
+  return items;
+}
+
+function ensureToolCallId(call: ToolCall, round: number): string {
+  const id = call.id?.trim();
+  if (id) return id;
+  const name = call.name?.trim() || "tool";
+  return `call_${round}_${call.index}_${name}`;
+}
 
 async function buildSkillsBlock(): Promise<string> {
   try {
@@ -47,26 +129,10 @@ async function buildSkillsBlock(): Promise<string> {
   }
 }
 
-function historyHasSkills(history: HistoryMessage[]) {
+function historyHasSkills(history: OpenRouterInputItem[]) {
   return history.some(
-    (msg) =>
-      msg.role === "system" && typeof msg.content === "string" && msg.content.includes(SKILLS_MARKER)
+    (msg) => readString(msg.role) === "system" && textFromContent(msg.content).includes(SKILLS_MARKER)
   );
-}
-
-function mapOpenRouterMessages(history: HistoryMessage[]): Array<Record<string, unknown>> {
-  return history.map((msg) => {
-    if (msg.role === "tool") return msg;
-
-    const { reasoning_content, ...rest } = msg as Exclude<HistoryMessage, { role: "tool" }>;
-    const mapped: Record<string, unknown> = { ...rest };
-
-    if (msg.role === "assistant" && reasoning_content) {
-      mapped.reasoning = reasoning_content;
-    }
-
-    return mapped;
-  });
 }
 
 const AGENT_TOOLS = [
@@ -262,50 +328,23 @@ async function getAgentTools() {
   return [...AGENT_TOOLS, ...mcpTools];
 }
 
-function getGlmConfig() {
-  const apiKey = process.env.GLM_API_KEY ?? process.env.ZHIPUAI_API_KEY ?? "";
-  const baseUrl =
-    process.env.GLM_BASE_URL ??
-    "https://open.bigmodel.cn/api/paas/v4/chat/completions";
-  const model = process.env.GLM_MODEL ?? "glm-4.7";
-
-  if (!apiKey) {
-    throw new Error("Missing GLM API key (set GLM_API_KEY or ZHIPUAI_API_KEY)");
-  }
-
-  return { apiKey, baseUrl, model };
-}
-
-type LlmProvider = "glm" | "openrouter";
-
-function getLlmProvider(): LlmProvider {
-  const raw = (process.env.LLM_PROVIDER ?? "glm").toLowerCase();
-  if (raw === "openrouter" || raw === "open-router" || raw === "or") return "openrouter";
-  return "glm";
-}
-
-function normalizeOpenRouterUrl(value: string) {
-  if (!value) return "https://openrouter.ai/api/v1/chat/completions";
-  if (value.endsWith("/chat/completions")) return value;
-  if (value.endsWith("/api/v1")) return `${value}/chat/completions`;
-  if (value.endsWith("/v1")) return `${value}/chat/completions`;
-  return value;
-}
-
 function getOpenRouterConfig() {
   const apiKey = process.env.OPENROUTER_API_KEY ?? "";
-  const baseUrl = normalizeOpenRouterUrl(
-    process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1/chat/completions"
+  const baseUrl = normalizeOpenRouterResponsesUrl(
+    process.env.OPENROUTER_BASE_URL ?? "https://openrouter.ai/api/v1/responses"
   );
   const model = process.env.OPENROUTER_MODEL ?? "";
   const httpReferer = process.env.OPENROUTER_HTTP_REFERER ?? "";
   const appTitle = process.env.OPENROUTER_APP_TITLE ?? "";
+  const effortRaw = (process.env.OPENROUTER_REASONING_EFFORT ?? "").trim().toLowerCase();
+  const reasoningEffort =
+    effortRaw === "low" || effortRaw === "medium" || effortRaw === "high" ? effortRaw : "";
 
   if (!apiKey) {
     throw new Error("Missing OPENROUTER_API_KEY");
   }
 
-  return { apiKey, baseUrl, model, httpReferer, appTitle };
+  return { apiKey, baseUrl, model, httpReferer, appTitle, reasoningEffort };
 }
 
 class AgentRunner {
@@ -332,7 +371,7 @@ class AgentRunner {
     try {
       const agent = await store.getAgent({ agentId: this.agentId });
       const parsed = safeJsonParse<unknown>(agent.llmHistory, {});
-      const history = Array.isArray(parsed) ? (parsed as HistoryMessage[]) : [];
+      const history = Array.isArray(parsed) ? (parsed as OpenRouterInputItem[]) : [];
       if (historyHasSkills(history)) return;
       const skillsBlock = await buildSkillsBlock();
       if (!skillsBlock) return;
@@ -434,7 +473,7 @@ class AgentRunner {
     const workspaceId = await store.getGroupWorkspaceId({ groupId });
     const agent = await store.getAgent({ agentId: this.agentId });
     const parsed = safeJsonParse<unknown>(agent.llmHistory, {});
-    const history = Array.isArray(parsed) ? (parsed as HistoryMessage[]) : [];
+    const history = Array.isArray(parsed) ? (parsed as OpenRouterInputItem[]) : [];
     const skillsBlock = await buildSkillsBlock();
     const hasSkills = historyHasSkills(history);
 
@@ -468,17 +507,19 @@ class AgentRunner {
       await store.markGroupReadToMessage({ groupId, readerId: this.agentId, messageId: lastId });
     }
 
-    const { assistantText, assistantThinking, didSend } = await this.runWithTools({
+    const { assistantText, assistantThinking, assistantReasoningDetails, didSend } = await this.runWithTools({
       groupId,
       workspaceId,
       history,
     });
 
-    history.push({
-      role: "assistant",
-      content: assistantText,
-      reasoning_content: assistantThinking || undefined,
-    });
+    history.push(
+      ...buildAssistantTurnHistoryItems({
+        assistantText,
+        assistantThinking,
+        reasoningDetails: assistantReasoningDetails,
+      })
+    );
 
     if (!didSend && !this.interruptRequested) {
       history.push({
@@ -493,11 +534,13 @@ class AgentRunner {
         history,
       });
 
-      history.push({
-        role: "assistant",
-        content: followup.assistantText,
-        reasoning_content: followup.assistantThinking || undefined,
-      });
+      history.push(
+        ...buildAssistantTurnHistoryItems({
+          assistantText: followup.assistantText,
+          assistantThinking: followup.assistantThinking,
+          reasoningDetails: followup.assistantReasoningDetails,
+        })
+      );
     }
     await store.setAgentHistory({
       agentId: this.agentId,
@@ -523,14 +566,17 @@ class AgentRunner {
   private async runWithTools(input: {
     groupId: UUID;
     workspaceId: UUID;
-    history: HistoryMessage[];
+    history: OpenRouterInputItem[];
   }) {
-    const maxToolRounds = 3;
     let assistantText = "";
     let assistantThinking = "";
+    let assistantReasoningDetails: unknown[] = [];
     let didSend = false;
 
-    for (let round = 0; round < maxToolRounds; round++) {
+    for (let round = 0; ; round++) {
+      if (this.interruptRequested) {
+        return { assistantText, assistantThinking, assistantReasoningDetails, didSend };
+      }
       const res = await this.callLlmStreaming(input.history, {
         workspaceId: input.workspaceId,
         groupId: input.groupId,
@@ -538,37 +584,46 @@ class AgentRunner {
       });
       assistantText = res.assistantText;
       assistantThinking = res.assistantThinking;
+      assistantReasoningDetails = Array.isArray(res.reasoningDetails) ? res.reasoningDetails : [];
 
       if (res.toolCalls.length === 0) {
-        return { assistantText, assistantThinking, didSend };
+        return { assistantText, assistantThinking, assistantReasoningDetails, didSend };
       }
 
-      input.history.push({
-        role: "assistant",
-        content: res.assistantText,
-        tool_calls: res.toolCalls.map((c) => ({
-          id: c.id,
-          type: "function",
-          function: { name: c.name, arguments: c.argumentsText },
-        })),
-        reasoning_content: res.assistantThinking || undefined,
-      });
+      input.history.push(
+        ...buildAssistantTurnHistoryItems({
+          assistantText: res.assistantText,
+          assistantThinking: res.assistantThinking,
+          reasoningDetails: assistantReasoningDetails,
+        })
+      );
 
       for (const call of res.toolCalls) {
-        if (call.name && SEND_TOOL_NAMES.has(call.name)) {
+        const callId = ensureToolCallId(call, round);
+        const callName = call.name ?? "";
+
+        input.history.push({
+          type: "function_call",
+          id: callId,
+          call_id: callId,
+          name: callName,
+          arguments: call.argumentsText ?? "",
+        });
+
+        if (callName && SEND_TOOL_NAMES.has(callName)) {
           didSend = true;
         }
         const result = await this.executeToolCall({
           groupId: input.groupId,
-          call,
+          call: { ...call, id: callId },
         });
         this.bus.emit(this.agentId, {
           event: "agent.stream",
           data: {
             kind: "tool_result",
             delta: JSON.stringify(result),
-            tool_call_id: call.id,
-            tool_call_name: call.name,
+            tool_call_id: callId,
+            tool_call_name: callName,
           },
         });
         void appendAgentStreamEvent({
@@ -576,20 +631,17 @@ class AgentRunner {
           round,
           kind: "tool_result",
           delta: JSON.stringify(result),
-          tool_call_id: call.id,
-          tool_call_name: call.name,
+          tool_call_id: callId,
+          tool_call_name: callName,
         });
         input.history.push({
-          role: "tool",
-          content: JSON.stringify(result),
-          tool_call_id: call.id,
-          name: call.name,
+          type: "function_call_output",
+          id: `output_${callId}`,
+          call_id: callId,
+          output: JSON.stringify(result),
         });
       }
-
     }
-
-    return { assistantText, assistantThinking, didSend };
   }
 
   private async executeToolCall(input: { groupId: UUID; call: ToolCall }) {
@@ -989,47 +1041,25 @@ class AgentRunner {
   }
 
   private async callLlmStreaming(
-    history: HistoryMessage[],
+    history: OpenRouterInputItem[],
     ctx: { workspaceId: UUID; groupId: UUID; round: number }
   ) {
-    const provider = getLlmProvider();
-    if (provider === "openrouter") {
-      return this.callOpenRouterStreaming(history, ctx);
-    }
-    return this.callGlmStreaming(history, ctx);
+    return this.callProviderStreaming(history, ctx);
   }
 
-  private async callOpenRouterStreaming(
-    history: HistoryMessage[],
-    ctx: { workspaceId: UUID; groupId: UUID; round: number }
-  ) {
-    const { apiKey, baseUrl, model, httpReferer, appTitle } = getOpenRouterConfig();
-
-    getWorkspaceUIBus().emit(ctx.workspaceId, {
-      event: "ui.agent.llm.start",
-      data: {
-        workspaceId: ctx.workspaceId,
-        agentId: this.agentId,
-        groupId: ctx.groupId,
-        round: ctx.round,
-      },
-    });
-    void appendAgentStreamEvent({
-      agentId: this.agentId,
-      round: ctx.round,
-      kind: "start",
-    });
-
+  private async buildProviderRequest(
+    history: OpenRouterInputItem[],
+  ): Promise<{ url: string; headers: Record<string, string>; body: string; providerLabel: string }> {
+    const { apiKey, baseUrl, model, httpReferer, appTitle, reasoningEffort } = getOpenRouterConfig();
     const tools = await getAgentTools();
     const payload: Record<string, unknown> = {
-      // Preserve reasoning for OpenRouter using the canonical "reasoning" field.
-      messages: mapOpenRouterMessages(history),
+      input: history,
       stream: true,
-      stream_options: { include_usage: true },
     };
     if (model) payload.model = model;
+    if (reasoningEffort) payload.reasoning = { effort: reasoningEffort };
     if (tools.length > 0) {
-      payload.tools = tools;
+      payload.tools = mapToOpenRouterResponsesTools(tools as unknown[]);
       payload.tool_choice = "auto";
     }
 
@@ -1040,131 +1070,18 @@ class AgentRunner {
     if (httpReferer) headers["HTTP-Referer"] = httpReferer;
     if (appTitle) headers["X-Title"] = appTitle;
 
-    const requestBody = JSON.stringify(payload);
-    void appendAgentLlmRequestRaw({ agentId: this.agentId, body: requestBody });
-
-    const upstream = await fetch(baseUrl, {
-      method: "POST",
-      headers,
-      body: requestBody,
-    });
-
-    if (!upstream.ok || !upstream.body) {
-      const text = await upstream.text().catch(() => "");
-      throw new Error(`OpenRouter upstream error: ${upstream.status} ${text}`);
-    }
-
-    const assembler = new OpenAIStreamAssembler();
-    let prev = assembler.snapshot();
-    let assistantText = "";
-    let assistantThinking = "";
-
-    for await (const evt of parseSSEJsonLines(upstream.body)) {
-      const state = assembler.push(evt as any);
-
-      const reasoningDelta = state.reasoningContent.slice(prev.reasoningContent.length);
-      const contentDelta = state.content.slice(prev.content.length);
-      const toolCallDeltas = extractToolCallDeltas(evt as any, prev, state);
-
-      if (reasoningDelta) {
-        assistantThinking += reasoningDelta;
-        this.bus.emit(this.agentId, {
-          event: "agent.stream",
-          data: { kind: "reasoning", delta: reasoningDelta },
-        });
-        void appendAgentStreamEvent({
-          agentId: this.agentId,
-          round: ctx.round,
-          kind: "reasoning",
-          delta: reasoningDelta,
-        });
-      }
-
-      if (contentDelta) {
-        assistantText += contentDelta;
-        this.bus.emit(this.agentId, {
-          event: "agent.stream",
-          data: { kind: "content", delta: contentDelta },
-        });
-        void appendAgentStreamEvent({
-          agentId: this.agentId,
-          round: ctx.round,
-          kind: "content",
-          delta: contentDelta,
-        });
-      }
-
-      for (const delta of toolCallDeltas) {
-        this.bus.emit(this.agentId, {
-          event: "agent.stream",
-          data: {
-            kind: "tool_calls",
-            delta: delta.delta,
-            tool_call_id: delta.tool_call_id,
-            tool_call_name: delta.tool_call_name,
-          },
-        });
-        void appendAgentStreamEvent({
-          agentId: this.agentId,
-          round: ctx.round,
-          kind: "tool_calls",
-          delta: delta.delta,
-          tool_call_id: delta.tool_call_id,
-          tool_call_name: delta.tool_call_name,
-        });
-      }
-
-      prev = state;
-    }
-
-    this.bus.emit(this.agentId, {
-      event: "agent.done",
-      data: { finishReason: prev.finishReason ?? undefined },
-    });
-    void appendAgentStreamEvent({
-      agentId: this.agentId,
-      round: ctx.round,
-      kind: "done",
-      finishReason: prev.finishReason ?? null,
-    });
-    getWorkspaceUIBus().emit(ctx.workspaceId, {
-      event: "ui.agent.llm.done",
-      data: {
-        workspaceId: ctx.workspaceId,
-        agentId: this.agentId,
-        groupId: ctx.groupId,
-        round: ctx.round,
-        finishReason: prev.finishReason ?? undefined,
-      },
-    });
-
-    const finalState = assembler.snapshot();
-
-    if (finalState.usage && finalState.usage.totalTokens > 0) {
-      try {
-        await store.setGroupContextTokens({
-          groupId: ctx.groupId,
-          tokens: finalState.usage.totalTokens,
-        });
-      } catch {
-        // Best effort - don't fail if token tracking fails
-      }
-    }
-
     return {
-      assistantText,
-      assistantThinking,
-      toolCalls: (finalState.toolCalls ?? []) as ToolCall[],
-      finishReason: finalState.finishReason,
+      url: baseUrl,
+      headers,
+      body: JSON.stringify(payload),
+      providerLabel: "OpenRouter",
     };
   }
 
-  private async callGlmStreaming(
-    history: HistoryMessage[],
+  private async callProviderStreaming(
+    history: OpenRouterInputItem[],
     ctx: { workspaceId: UUID; groupId: UUID; round: number }
   ) {
-    const { apiKey, baseUrl, model } = getGlmConfig();
-
     getWorkspaceUIBus().emit(ctx.workspaceId, {
       event: "ui.agent.llm.start",
       data: {
@@ -1180,42 +1097,44 @@ class AgentRunner {
       kind: "start",
     });
 
-    const glmPayload: Record<string, unknown> = {
-      model,
-      messages: history,
-      tools: await getAgentTools(),
-      tool_choice: "auto",
-      stream: true,
-      tool_stream: true,
-    };
-    const requestBody = JSON.stringify(glmPayload);
-    void appendAgentLlmRequestRaw({ agentId: this.agentId, body: requestBody });
+    const request = await this.buildProviderRequest(history);
+    void appendAgentLlmRequestRaw({
+      agentId: this.agentId,
+      body: request.body,
+    });
 
-    const upstream = await fetch(baseUrl, {
+    const upstream = await fetch(request.url, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: requestBody,
+      headers: request.headers,
+      body: request.body,
     });
 
     if (!upstream.ok || !upstream.body) {
       const text = await upstream.text().catch(() => "");
-      throw new Error(`GLM upstream error: ${upstream.status} ${text}`);
+      throw new Error(`${request.providerLabel} upstream error: ${upstream.status} ${text}`);
     }
 
-    const assembler = new GLMStreamAssembler();
-    let prev = assembler.snapshot();
+    const adapter = createLlmStreamAdapter("openrouter");
     let assistantText = "";
     let assistantThinking = "";
 
     for await (const evt of parseSSEJsonLines(upstream.body)) {
-      const state = assembler.push(evt as any);
+      const rawEvent = asRecord(evt);
+      const rawEventType = readString(rawEvent?.type);
+      const rawDelta = readString(rawEvent?.delta);
+      const rawItemType = readString(asRecord(rawEvent?.item)?.type);
+      const isReasoningChunk =
+        (typeof rawEventType === "string" && rawEventType.includes("reasoning")) ||
+        rawItemType === "reasoning";
+      if (isReasoningChunk) {
+        console.log(
+          `[llm.reasoning.chunk] agent=${this.agentId} round=${ctx.round} type=${
+            rawEventType ?? "unknown"
+          } itemType=${rawItemType ?? "n/a"} deltaLen=${rawDelta?.length ?? 0}`
+        );
+      }
 
-      const reasoningDelta = state.reasoningContent.slice(prev.reasoningContent.length);
-      const contentDelta = state.content.slice(prev.content.length);
-      const toolCallDeltas = extractToolCallDeltas(evt as any, prev, state);
+      const { reasoningDelta, contentDelta, toolCallDeltas } = adapter.push(evt);
 
       if (reasoningDelta) {
         assistantThinking += reasoningDelta;
@@ -1251,8 +1170,8 @@ class AgentRunner {
           data: {
             kind: "tool_calls",
             delta: delta.delta,
-            tool_call_id: delta.tool_call_id,
-            tool_call_name: delta.tool_call_name,
+            tool_call_id: delta.toolCallId,
+            tool_call_name: delta.toolCallName,
           },
         });
         void appendAgentStreamEvent({
@@ -1260,23 +1179,23 @@ class AgentRunner {
           round: ctx.round,
           kind: "tool_calls",
           delta: delta.delta,
-          tool_call_id: delta.tool_call_id,
-          tool_call_name: delta.tool_call_name,
+          tool_call_id: delta.toolCallId,
+          tool_call_name: delta.toolCallName,
         });
       }
-
-      prev = state;
     }
+
+    const finalState = adapter.snapshot();
 
     this.bus.emit(this.agentId, {
       event: "agent.done",
-      data: { finishReason: prev.finishReason ?? undefined },
+      data: { finishReason: finalState.finishReason ?? undefined },
     });
     void appendAgentStreamEvent({
       agentId: this.agentId,
       round: ctx.round,
       kind: "done",
-      finishReason: prev.finishReason ?? null,
+      finishReason: finalState.finishReason ?? null,
     });
     getWorkspaceUIBus().emit(ctx.workspaceId, {
       event: "ui.agent.llm.done",
@@ -1285,11 +1204,9 @@ class AgentRunner {
         agentId: this.agentId,
         groupId: ctx.groupId,
         round: ctx.round,
-        finishReason: prev.finishReason ?? undefined,
+        finishReason: finalState.finishReason ?? undefined,
       },
     });
-
-    const finalState = assembler.snapshot();
 
     // Save token usage (current context window size)
     if (finalState.usage && finalState.usage.totalTokens > 0) {
@@ -1306,53 +1223,11 @@ class AgentRunner {
     return {
       assistantText,
       assistantThinking,
+      reasoningDetails: finalState.reasoningDetails ?? [],
       toolCalls: (finalState.toolCalls ?? []) as ToolCall[],
       finishReason: finalState.finishReason,
     };
   }
-}
-
-function extractToolCallDeltas(
-  chunk: {
-    choices?: Array<{
-      delta?: {
-        tool_calls?: Array<{
-          index?: number;
-          id?: string;
-          function?: { name?: string; arguments?: string };
-        }>;
-      };
-    }>;
-  },
-  prevState: { toolCalls: Array<{ index: number; id?: string; name?: string; argumentsText: string }> },
-  nextState: { toolCalls: Array<{ index: number; id?: string; name?: string; argumentsText: string }> }
-): Array<{ delta: string; tool_call_id?: string; tool_call_name?: string }> {
-  const deltas: Array<{ delta: string; tool_call_id?: string; tool_call_name?: string }> = [];
-  const toolCalls = chunk.choices?.[0]?.delta?.tool_calls ?? [];
-  if (toolCalls.length === 0) return deltas;
-
-  const prevByIndex = new Map(prevState.toolCalls.map((call) => [call.index, call]));
-  const nextByIndex = new Map(nextState.toolCalls.map((call) => [call.index, call]));
-
-  for (const call of toolCalls) {
-    const index = call.index ?? 0;
-    const prev = prevByIndex.get(index);
-    const next = nextByIndex.get(index);
-    const name = call.function?.name ?? next?.name;
-    const id = call.id ?? next?.id;
-    const argsChunk = call.function?.arguments ?? "";
-
-    if (argsChunk) {
-      deltas.push({ delta: argsChunk, tool_call_id: id, tool_call_name: name });
-      continue;
-    }
-
-    if (name && name !== prev?.name) {
-      deltas.push({ delta: "", tool_call_id: id, tool_call_name: name });
-    }
-  }
-
-  return deltas;
 }
 
 export class AgentRuntime {

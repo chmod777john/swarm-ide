@@ -1,14 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 
-type HistoryMessage =
-  | {
-      role: "system" | "user" | "assistant";
-      content: string;
-      tool_calls?: unknown;
-      reasoning_content?: string;
-    }
-  | { role: "tool"; content: string; tool_call_id?: string; name?: string };
+type HistoryMessage = Record<string, unknown>;
 
 type HistorySnapshot = {
   at: string;
@@ -179,8 +172,28 @@ export async function appendAgentStreamEvent(input: {
 export async function appendAgentLlmRequestRaw(input: { agentId: string; body: string }) {
   const logDir = getRequestLogDir();
   await ensureDir(logDir);
-  const filename = path.join(logDir, `agent-${input.agentId}.jsonl`);
-  await enqueueRequestWrite(input.agentId, () => fs.appendFile(filename, `${input.body}\n`, "utf-8"));
+  const filename = path.join(logDir, `agent-${input.agentId}.json`);
+  let parsedBody: unknown = input.body;
+  try {
+    parsedBody = JSON.parse(input.body);
+  } catch {
+    // keep raw body string
+  }
+  await enqueueRequestWrite(input.agentId, async () => {
+    let items: unknown[] = [];
+    try {
+      const raw = await fs.readFile(filename, "utf-8");
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        items = parsed;
+      }
+    } catch {
+      // if file does not exist or is invalid json, start fresh
+    }
+
+    items.push(parsedBody);
+    await fs.writeFile(filename, JSON.stringify(items, null, 2), "utf-8");
+  });
 }
 
 async function writeStreamHeader(agentId: string, logDir: string, text: string) {
@@ -201,7 +214,7 @@ async function appendKindDelta(input: {
   tool_call_id?: string;
   tool_call_name?: string;
 }) {
-  const filename = path.join(logDir, `agent-${input.agentId}.${input.kind}.log`);
+  const filename = path.join(input.logDir, `agent-${input.agentId}.${input.kind}.log`);
   let text = input.delta;
 
   if (input.kind === "tool_calls" || input.kind === "tool_result") {
