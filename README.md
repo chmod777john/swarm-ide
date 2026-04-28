@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/chmod777john-swarm-ide-badge.png)](https://mseep.ai/app/chmod777john-swarm-ide)
+
 # Swarm-IDE: 自组织的Agent蜂群
 
 [English README](./README_EN.md)
